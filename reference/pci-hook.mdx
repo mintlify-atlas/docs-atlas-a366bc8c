@@ -1,0 +1,125 @@
+---
+title: "PCI host bridge protocol hook internals"
+description: "Technical reference for how ReBarDxe hooks the EFI PCI Host Bridge Resource Allocation Protocol to intercept and configure Resizable BAR during PCI enumeration."
+---
+
+`ReBarDxe` modifies BAR sizes by inserting itself into the UEFI PCI enumeration pipeline rather than implementing a full PCI bus driver. It locates the live `EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL` instance that `PciBusDxe` will use, overwrites its `PreprocessController` function pointer with a replacement, and calls the original pointer from within that replacement. Every time `PciBusDxe` preprocesses a controller it therefore also runs the Resizable BAR setup logic transparently.
+
+## Protocol being hooked
+
+The target is `EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL`, specifically its `PreprocessController` member. This function is called by `PciBusDxe` for each PCI device during bus enumeration, once or more per device depending on the phase. The protocol GUID is `gEfiPciHostBridgeResourceAllocationProtocolGuid`.
+
+## Hook installation
+
+`pciHostBridgeResourceAllocationProtocolHook()` in `ReBar.c` performs three steps:
+
+1. **Locate handles** — calls `LocateHandleBuffer` to find all handles that expose the protocol.
+2. **Open the protocol** — opens the first handle with `EFI_OPEN_PROTOCOL_GET_PROTOCOL` to obtain a pointer to the live protocol struct.
+3. **Replace the function pointer** — saves the original pointer and substitutes the override:
+
+```c
+// Hook PreprocessController
+o_PreprocessController = pciResAlloc->PreprocessController;
+pciResAlloc->PreprocessController = &PreprocessControllerOverride;
+```
+
+The original pointer `o_PreprocessController` is stored in a file-scoped static variable so it remains valid for the lifetime of the driver.
+
+## Override function
+
+```c
+EFI_STATUS EFIAPI PreprocessControllerOverride (
+  IN  EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL  *This,
+  IN  EFI_HANDLE                                        RootBridgeHandle,
+  IN  EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_PCI_ADDRESS       PciAddress,
+  IN  EFI_PCI_CONTROLLER_RESOURCE_ALLOCATION_PHASE      Phase
+  )
+{
+    // call the original method
+    EFI_STATUS status = o_PreprocessController(This, RootBridgeHandle, PciAddress, Phase);
+
+    // EDK2 PciBusDxe setups Resizable BAR twice so we will do same
+    if (Phase <= EfiPciBeforeResourceCollection) {
+        reBarSetupDevice(RootBridgeHandle, PciAddress);
+    }
+
+    return status;
+}
+```
+
+The override always calls the original first, preserving any firmware-specific preprocessing logic. It then calls `reBarSetupDevice` only during phases up to and including `EfiPciBeforeResourceCollection`, mirroring EDK2's own two-pass Resizable BAR setup behaviour. The return value from the original is forwarded unchanged.
+
+## BAR setup logic
+
+`reBarSetupDevice()` receives the root bridge handle and the PCI address (bus/device/function) for a single endpoint. It performs the following steps:
+
+```c
+VOID reBarSetupDevice(EFI_HANDLE handle, EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_PCI_ADDRESS addrInfo)
+{
+    // Find Resizable BAR extended capability (PCI_EXT_CAP_ID_REBAR = 0x15)
+    epos = pciFindExtCapability(pciAddress, PCI_EXT_CAP_ID_REBAR);
+    if (epos)
+    {
+        for (UINT8 bar = 0; bar < 6; bar++)
+        {
+            UINT32 rBarS = pciRebarGetPossibleSizes(pciAddress, epos, vid, did, bar);
+            if (!rBarS) continue;
+            // start with size from fls (find last set bit)
+            for (UINT8 n = MIN((UINT8)fls(rBarS), reBarState); n > 0; n--) {
+                if (rBarS & (1 << n)) {
+                    pciRebarSetSize(pciAddress, epos, bar, n);
+                    break;
+                }
+            }
+        }
+    }
+}
+```
+
+<Steps>
+  <Step title="Validate the device">
+    Reads vendor ID at config space offset 0. If the value is `0xFFFF` (device absent or not responding), the function returns immediately.
+  </Step>
+  <Step title="Find the Resizable BAR extended capability">
+    Calls `pciFindExtCapability` to walk the PCIe extended capability list (starting at offset 0x100) looking for capability ID `0x15` (`PCI_EXT_CAP_ID_REBAR`). Returns 0 if not found; the device is skipped.
+  </Step>
+  <Step title="Iterate over all six BARs">
+    For each BAR index 0–5, calls `pciRebarGetPossibleSizes` which reads the `PCI_REBAR_CAP` register and masks with `PCI_REBAR_CAP_SIZES` (0x00FFFFF0) to obtain a bitmask of supported sizes. A zero result means the BAR has no Resizable BAR entry and is skipped.
+  </Step>
+  <Step title="Select the target size">
+    Uses `fls` (find-last-set-bit, implemented with `bsrl` on x86 or `_BitScanReverse64` on MSVC) to find the highest supported size bit. The starting point is capped at `reBarState` (the NVRAM value). The inner loop counts down from this starting index until it finds a bit set in the supported-sizes mask, then calls `pciRebarSetSize` to write that size into the `PCI_REBAR_CTRL` register.
+  </Step>
+</Steps>
+
+## Resizable BAR register constants
+
+These constants are defined in `pciRegs.h` (adapted from the Linux kernel header):
+
+| Constant | Value | Description |
+|---|---|---|
+| `PCI_EXT_CAP_ID_REBAR` | `0x15` | Extended capability ID for Resizable BAR |
+| `PCI_REBAR_CAP` | `4` | Offset to capability register within the extended cap |
+| `PCI_REBAR_CAP_SIZES` | `0x00FFFFF0` | Bitmask of supported BAR sizes in the cap register |
+| `PCI_REBAR_CTRL` | `8` | Offset to control register within the extended cap |
+| `PCI_REBAR_CTRL_BAR_IDX` | `0x00000007` | BAR index field in control register |
+| `PCI_REBAR_CTRL_NBAR_MASK` | `0x000000E0` | Number of resizable BARs field |
+| `PCI_REBAR_CTRL_NBAR_SHIFT` | `5` | Shift for number-of-BARs field |
+| `PCI_REBAR_CTRL_BAR_SIZE` | `0x00001F00` | BAR size field in control register |
+| `PCI_REBAR_CTRL_BAR_SHIFT` | `8` | Shift for BAR size field |
+
+## PCI configuration space access
+
+All PCI reads and writes use the `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL` obtained per-device via `HandleProtocol`. The driver implements thin wrappers around `Pci.Read` and `Pci.Write` for byte, word, and dword widths. Addresses are encoded using EDK2's `EFI_PCI_ADDRESS` macro which packs bus, device, function, and register offset into a 64-bit value.
+
+## Device quirk: Sapphire RX 5600 XT Pulse
+
+One device-specific workaround is present in `pciRebarGetPossibleSizes`:
+
+```c
+/* Sapphire RX 5600 XT Pulse has an invalid cap dword for BAR 0 */
+if (vid == PCI_VENDOR_ID_ATI && did == 0x731f &&
+    bar == 0 && cap == 0x7000)
+    cap = 0x3f000;
+```
+
+The Sapphire RX 5600 XT Pulse (AMD vendor ID `0x1002`, device ID `0x731f`) reports `0x7000` in its Resizable BAR capability register for BAR 0, which only covers sizes up to 256 MB. The driver substitutes `0x3f000`, which advertises support up to 2 GB, matching the actual hardware capability. This quirk is applied before the size-selection loop so the corrected bitmask is used for all size decisions.

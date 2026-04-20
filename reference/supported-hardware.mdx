@@ -1,0 +1,90 @@
+---
+title: "Supported hardware platforms and GPUs"
+description: "Which Intel and AMD CPU platforms, motherboard chipsets, and GPU models are confirmed compatible with ReBarUEFI for Resizable BAR enablement."
+---
+
+ReBarUEFI works by injecting a DXE driver into the UEFI firmware's DXE volume. The driver hooks `PreprocessController` in `PciHostBridgeResourceAllocationProtocol` to detect and configure Resizable BAR capability on any PCIe device that exposes PCI Extended Capability ID `0x15`. This approach is broadly compatible across Intel and AMD platforms, though several generations require additional UEFIPatch binary patches to unlock 64-bit MMIO address space or fix broken USB when 4G Decoding is enabled.
+
+## CPU platform compatibility
+
+The table below summarises which Intel CPU generations and AMD AM4 platforms are known to work, along with any extra steps required.
+
+| Platform | Generation | Notes |
+|---|---|---|
+| Sandy Bridge | 2nd Gen Intel Core (LGA 1155) | PCIe Gen2; works — i5-2500K confirmed. May need DSDT modification for full address space. |
+| Ivy Bridge | 3rd Gen Intel Core (LGA 1155) | Works. USB 3 fix patch (`IvyUSB3.txt`) required if USB stops working after enabling 4G Decoding. |
+| Haswell | 4th Gen Intel Core (LGA 1150) | Works. USB 3 fix patch (`HswUSB3.txt`) and Above 4G fix (`HswAbove4G.txt`) available. |
+| Broadwell | 5th Gen Intel Core (LGA 1150) | Works. USB 3 fix patch (`BdwUSB3.txt`) and Above 4G fix (`HswAbove4G.txt`) available. |
+| X79 / LGA 2011 | Intel Sandy Bridge-E/EP | Works. Above 4G Decoding fix patch available (see `patches.txt`). |
+| X99 / LGA 2011-v3 | Intel Haswell-E/EP (C612 chipset) | Works. NVRAM whitelist patch required on many boards to avoid `GetLastError: 5` when writing `ReBarState`. AliExpress X99 boards are well-documented via Miyconst's tutorial. |
+| Skylake | 6th Gen Intel Core (LGA 1151) | Works. Full 512 GB/39-bit MMIO patch available. |
+| Kaby Lake | 7th Gen Intel Core (LGA 1151) | Works. Same patch set as Skylake. |
+| Coffee Lake | 8th/9th Gen Intel Core (LGA 1151) | Works. Same patch set as Skylake/Kaby Lake. |
+| AMD AM4 | Ryzen 1000–5000 (B350–B550/X570) | Works on boards that lack official Resizable BAR support. No platform-specific patches required. |
+
+<Note>
+  Most Intel platforms from Sandy Bridge onward require at least one UEFIPatch binary patch to extend the MMIO address window beyond 4 GB or 16 GB. See [UEFIPatch pattern reference](/reference/known-patches) for the full patch list.
+</Note>
+
+<Warning>
+  Sandy Bridge and Ivy Bridge systems expanding the MMIO range to the full 64 GB/36-bit space **may require a DSDT modification** in addition to the firmware patch. Consult the ReBarUEFI wiki page on DSDT Patching before proceeding.
+</Warning>
+
+## GPU compatibility
+
+Resizable BAR support in hardware is identified by PCI Extended Capability ID `0x15`. ReBarDxe scans all six BARs on every enumerated PCIe device for this capability and programs the largest supported size up to the limit stored in the `ReBarState` NVRAM variable.
+
+<Tabs>
+  <Tab title="AMD Radeon">
+    | GPU family | Status | Notes |
+    |---|---|---|
+    | RX 5000 series (Navi) | Confirmed working | Includes RX 5700 XT and similar. |
+    | RX 6000 series (RDNA 2) | Confirmed working | Official ReBAR support on modern boards; ReBarUEFI extends this to older platforms. |
+    | RX 580 / Polaris | Confirmed working | Up to 12% FPS uplift observed with 2 GB BAR on an i5-3470 system. |
+    | RX 5600 XT Pulse (Sapphire) | Confirmed working (quirk applied) | The firmware contains a specific quirk for VID `0x1002` / DID `0x731f` BAR 0: the capability register reports `0x7000` instead of the correct `0x3f000`, and ReBarDxe corrects this automatically at runtime. |
+  </Tab>
+  <Tab title="NVIDIA">
+    | GPU family | Status | Notes |
+    |---|---|---|
+    | RTX 30 series (Ampere) | Should work | ReBAR-capable; no known blockers on supported platforms. |
+    | RTX 40 series (Ada Lovelace) | Should work | ReBAR-capable; no known blockers on supported platforms. |
+    | RTX 20 / GTX 16 series (Turing) | **Not supported** | Turing GPUs require a different enablement path. Use [NvStrapsReBar](https://github.com/terminatorul/NvStrapsReBar) instead. |
+    | GTX 10 series and older | Not applicable | These GPUs do not expose Resizable BAR capability. |
+  </Tab>
+  <Tab title="Intel">
+    | GPU family | Status | Notes |
+    |---|---|---|
+    | Intel Arc (Alchemist and later) | Confirmed working | Resizable BAR is **required** for Intel Arc GPUs to function at optimal performance. Intel's own documentation lists it as a prerequisite. |
+  </Tab>
+</Tabs>
+
+<Info>
+  BAR sizes smaller than the GPU's full VRAM can still improve performance. Testing on an RX 580 8 GB with a 2 GB BAR showed up to 12% higher frame rates compared to no Resizable BAR at all. Set `ReBarState` to `32` (unlimited) first; fall back to a smaller power-of-two value only if the system fails to boot.
+</Info>
+
+## Motherboard-specific compatibility
+
+The project maintains a community-sourced list of confirmed-working motherboards.
+
+<Note>
+  Visit the GitHub issue tracker at [github.com/xCuri0/ReBarUEFI/issues/11](https://github.com/xCuri0/ReBarUEFI/issues/11) for the full list of working motherboards. If Resizable BAR works on your board, add a reply so it can be recorded.
+</Note>
+
+AliExpress X99 boards (LGA 2011-v3) have a dedicated video tutorial by Miyconst covering the full patching workflow. These boards generally do not require UEFIPatch and can follow a simplified process.
+
+## What is not supported
+
+<AccordionGroup>
+  <Accordion title="Legacy BIOS (non-UEFI) systems">
+    ReBarUEFI is a UEFI DXE driver and can only be loaded by a UEFI firmware. Systems that boot exclusively through legacy BIOS/CSM are not supported. CSM must also be **disabled** on UEFI systems once the patched firmware is installed, as CSM conflicts with 4G Decoding.
+  </Accordion>
+  <Accordion title="NVIDIA Turing GPUs (RTX 20 / GTX 16 series)">
+    Turing-generation NVIDIA GPUs require a separate tool called NvStrapsReBar to enable Resizable BAR. ReBarUEFI's generic approach does not work with these GPUs due to how Turing handles BAR resizing. See the [NvStrapsReBar project](https://github.com/terminatorul/NvStrapsReBar) for instructions.
+  </Accordion>
+  <Accordion title="Systems with blocked NVRAM writes">
+    Some X99/C612 and other motherboards whitelist the NVRAM variables that firmware can write. Without applying the appropriate NVRAM whitelist unlock patch, ReBarState's `SetVariable` call returns error code 5 (`EFI_ACCESS_DENIED`) and Resizable BAR cannot be configured. Apply the `NvramSmiDxe` or `NvramSmi` patch from `patches.txt` before attempting to set `ReBarState`.
+  </Accordion>
+  <Accordion title="Systems without 4G Decoding (Above 4G)">
+    Without 4G Decoding enabled, the firmware cannot map BARs above the 4 GB physical address boundary. This limits BAR sizes to 1 GB (sometimes 512 MB, extendable to 2 GB by reducing TOLUD). Full Resizable BAR performance requires 4G Decoding to be turned on — either via a visible firmware setting or via the hidden-option unlock documented in the ReBarUEFI wiki.
+  </Accordion>
+</AccordionGroup>

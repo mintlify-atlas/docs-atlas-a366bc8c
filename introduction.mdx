@@ -1,0 +1,77 @@
+---
+title: "ReBarUEFI: Enable Resizable BAR on older UEFI"
+description: "ReBarUEFI is a UEFI DXE driver that unlocks Resizable BAR on older motherboards, delivering GPU performance gains of up to 12% on unsupported platforms."
+---
+
+ReBarUEFI is an open-source UEFI DXE driver that enables Resizable BAR (ReBAR) on systems whose firmware does not support it natively. It works by injecting a small driver into your motherboard firmware's DXE volume — the same volume that initializes hardware at every boot — and hooking the PCI enumeration process to configure BAR sizes according to your preferences. The result is full PCIe GPU framebuffer access on platforms that were previously locked to 256 MB chunks, with documented FPS improvements of up to 12%.
+
+<Note>
+  Intel Arc GPUs **require** Resizable BAR to function optimally. If you are pairing an Arc GPU with an older motherboard that predates official ReBAR support, ReBarUEFI is the recommended solution.
+</Note>
+
+<Warning>
+  If you are using an **NVIDIA Turing GPU (RTX 20 series or GTX 16 series)**, ReBarUEFI does not apply. Use [NvStrapsReBar](https://github.com/terminatorul/NvStrapsReBar) instead, which handles the Turing-specific BAR enablement flow.
+</Warning>
+
+## What is Resizable BAR?
+
+Resizable BAR is a PCIe specification feature (exposed via the `PCI_EXT_CAP_ID_REBAR` extended capability, ID `0x15`) that allows the CPU to access the entire GPU framebuffer memory at once, rather than in fixed 256 MB windows. When the full framebuffer is visible to the CPU, the driver can transfer assets more efficiently, reducing stalls and improving rendering throughput.
+
+Modern GPUs from AMD (RX 5000 series and newer) and NVIDIA (RTX 20 series and newer) include ReBAR capability in hardware. The bottleneck on older systems is the motherboard firmware, which never negotiates larger BARs during PCI enumeration even when both the CPU and GPU support them.
+
+## What ReBarUEFI does
+
+ReBarUEFI addresses this firmware gap at the DXE phase of UEFI boot — before the operating system loads — in two steps:
+
+1. **ReBarDxe** is the UEFI DXE driver. When loaded, it hooks the `PreprocessController` function of `PciHostBridgeResourceAllocationProtocol`. During PCI enumeration, this hook checks each device for Resizable BAR capability and sets the BAR size to the value stored in the `ReBarState` NVRAM variable. The patched `PciBus` module then detects and allocates the new BAR size normally.
+
+2. **ReBarState** is a small command-line utility (Windows and Linux) that writes the `ReBarState` UEFI variable. It accepts a value from `0` (disabled) to `32` (unlimited), where values `1`–`31` set a maximum BAR size of `2^x` MB.
+
+<CardGroup cols={2}>
+  <Card title="ReBarDxe" icon="microchip">
+    The UEFI DXE driver injected into your firmware's DXE volume. Hooks `PreprocessController` to configure BAR sizes during every boot.
+  </Card>
+  <Card title="ReBarState" icon="sliders">
+    The configuration utility. Sets the `ReBarState` NVRAM variable that controls the maximum BAR size ReBarDxe will negotiate.
+  </Card>
+</CardGroup>
+
+## How the hook works
+
+At boot, `PciHostBridgeResourceAllocationProtocol` orchestrates PCI resource allocation across all root bridges. ReBarDxe locates this protocol, saves a pointer to the original `PreprocessController` function, and replaces it with its own override. The override:
+
+1. Calls the original `PreprocessController` to preserve normal firmware behavior.
+2. Scans the device for a Resizable BAR extended capability (`PCI_EXT_CAP_ID_REBAR`).
+3. If found, iterates over up to six BARs and sets each to the largest supported size that does not exceed the configured `ReBarState` value.
+
+This runs during `EfiPciBeforeResourceCollection`, so the `PciBus` module sees the updated BAR sizes when it allocates memory ranges.
+
+## Compatibility
+
+ReBarUEFI has been tested on a wide range of platforms, from Sandy Bridge (PCIe Gen 2) through modern Intel and AMD systems. One user confirmed it working on an i5-2500K, which was previously thought too old for ReBAR. X99, Z170, Z270, Z370, and many other chipsets are represented in the community compatibility list.
+
+<AccordionGroup>
+  <Accordion title="Supported GPU families">
+    Most discrete GPUs that include the PCIe Resizable BAR extended capability work with ReBarUEFI. This includes AMD RX 5000 series and newer, and NVIDIA RTX 20 series and newer (except Turing, which requires NvStrapsReBar). Older GPUs without the `PCI_EXT_CAP_ID_REBAR` capability (ID `0x15`) in their PCIe config space will simply be skipped.
+  </Accordion>
+  <Accordion title="Sandy Bridge / PCIe Gen 2 systems">
+    PCIe Gen 2 platforms were previously believed to be incompatible with Resizable BAR, but community testing has shown otherwise. An i5-2500K system has been confirmed working. Sandy/Ivy Bridge systems may require a DSDT modification and the MMIO space patch (16 GB to 64 GB range) to allocate large BARs correctly.
+  </Accordion>
+  <Accordion title="CMOS reset safety">
+    ReBarDxe detects CMOS resets by comparing the system clock year against a build-time constant. If the system time has been cleared (year appears to be before 2023), ReBarDxe automatically resets `ReBarState` to `0` and disables itself, preventing a boot failure after a battery removal or CMOS clear.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Requirements" icon="list-check" href="/requirements">
+    Verify your hardware, firmware, and BIOS settings before proceeding.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Download, inject, and configure ReBarUEFI end to end.
+  </Card>
+  <Card title="Adding the FFS module" icon="puzzle-piece" href="/installation/adding-ffs-module">
+    Detailed instructions for injecting the driver with UEFITool.
+  </Card>
+</CardGroup>

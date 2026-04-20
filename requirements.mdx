@@ -1,0 +1,125 @@
+---
+title: "System requirements for ReBarUEFI"
+description: "Hardware, firmware, and BIOS settings required to run ReBarUEFI. Check PCIe GPU capability, 4G Decoding, CSM status, and platform-specific prerequisites."
+---
+
+Before installing ReBarUEFI, confirm that your system meets the hardware and firmware requirements below. Most modern discrete GPU setups on older motherboards will qualify, but a few firmware settings must be correct for the driver to function and for the system to POST successfully after enabling Resizable BAR.
+
+## Firmware requirements
+
+ReBarUEFI is a **UEFI DXE driver**. It cannot run on systems with legacy BIOS (non-UEFI firmware). If your motherboard only supports legacy boot mode, ReBarUEFI is not applicable.
+
+<Note>
+  Most motherboards from 2012 onward ship with UEFI firmware. Sandy Bridge (2011) and Ivy Bridge (2012) boards often support UEFI but may require additional patches — see the platform-specific notes below.
+</Note>
+
+## Hardware requirements
+
+### GPU with Resizable BAR capability
+
+Your discrete GPU must implement the PCIe Resizable BAR extended capability (`PCI_EXT_CAP_ID_REBAR`, capability ID `0x15`) in its PCIe configuration space. ReBarDxe scans for this capability at boot; devices that do not advertise it are skipped silently.
+
+GPUs confirmed to include Resizable BAR capability:
+
+- **AMD** Radeon RX 5000 series (Navi 10) and newer
+- **NVIDIA** RTX 20 series and newer (excluding Turing — see warning below)
+
+<Warning>
+  **NVIDIA Turing GPUs (RTX 20 series and GTX 16 series)** require a different tool. Use [NvStrapsReBar](https://github.com/terminatorul/NvStrapsReBar) to enable Resizable BAR on Turing. ReBarUEFI will not achieve the desired result on these GPUs.
+</Warning>
+
+### CPU and platform
+
+Any CPU with PCIe support is potentially compatible, including PCIe Gen 2 platforms. An i5-2500K (Sandy Bridge) has been confirmed working by a community member, disproving the earlier assumption that Gen 2 systems are incompatible.
+
+## BIOS settings
+
+The following BIOS settings are required or strongly recommended. Access them in your motherboard's UEFI setup utility before or after flashing the modified firmware.
+
+### 4G Decoding (Above 4G Decoding) — strongly recommended
+
+4G Decoding allows PCIe devices to be mapped to memory addresses above the 4 GB boundary, which is necessary for the OS and firmware to address large BARs correctly.
+
+<Info>
+  Without 4G Decoding enabled, ReBarUEFI will be limited to a **maximum BAR size of 1 GB**, and in some cases only 512 MB. You can attempt to increase this limit up to 2 GB by reducing the TOLUD (Top of Low Usable DRAM) setting, but enabling 4G Decoding is the correct solution.
+</Info>
+
+If your BIOS does not expose a 4G Decoding option, it may be hidden. Check the wiki guide on enabling hidden 4G Decoding, or apply the relevant UEFIPatch patterns for your platform.
+
+### CSM (Compatibility Support Module) — must be disabled
+
+CSM provides legacy BIOS compatibility and must be **disabled**. Running ReBarUEFI with CSM enabled can prevent the system from POSTing after Resizable BAR is configured.
+
+### Large BAR support in firmware
+
+Some older firmware versions impose an artificial cap on BAR sizes (for example, rejecting BARs larger than 4 GB, 16 GB, or 64 GB). UEFIPatch patterns are available to remove these limits:
+
+- `<4GB BAR size limit removal`
+- `<16GB BAR size limit removal`
+- `<64GB BAR size limit removal`
+- Prevent 64-bit BARs from being downgraded to 32-bit
+
+Refer to the [UEFI Patching](/patching/overview) section for instructions on applying these patches if your system requires them.
+
+## Platform-specific notes
+
+<Tabs>
+  <Tab title="Intel platforms">
+
+    **Skylake / Kaby Lake / Coffee Lake (6th–9th gen)**
+
+    These platforms have an MMIO space limited to 16–32 GB by default. A UEFIPatch pattern is available to expand this to the full 512 GB / 39-bit range, which is required for very large BARs on these chipsets.
+
+    **Haswell / Broadwell (4th–5th gen)**
+
+    MMIO space is 8–16 GB by default. A patch expands this to the full 512 GB / 39-bit range. These platforms may also benefit from the USB 3 ports fix (the USB 3 patch prevents ports from stopping working in BIOS when 4G Decoding is enabled).
+
+    **Sandy Bridge / Ivy Bridge (2nd–3rd gen)**
+
+    MMIO space is limited to 16 GB by default; a patch expands it to the 64 GB / 36-bit range. Some motherboards require an additional DSDT modification — see the [DSDT Patching](/patching/dsdt-patching) guide. Resizable BAR on PCIe Gen 2 is not officially supported but has been confirmed working in community testing.
+
+
+  </Tab>
+  <Tab title="AMD platforms">
+
+    **X99 / LGA 2011-3**
+
+    A specific Above 4G Decoding fix patch is available for X99 boards. AliExpress X99 boards in particular have been widely tested and are known to work well with ReBarUEFI. See the video tutorial by Miyconst linked in the README for a walkthrough.
+
+    **AM4 and AM5 (Ryzen)**
+
+    Modern Ryzen platforms often have native ReBAR support in their BIOS. If your board's BIOS update has added an official ReBAR toggle, you may not need ReBarUEFI at all. ReBarUEFI is primarily useful on older AMD boards that shipped before official support was added.
+
+  </Tab>
+</Tabs>
+
+## Summary checklist
+
+<AccordionGroup>
+  <Accordion title="Before you flash" defaultOpen={true}>
+    - UEFI firmware (not legacy BIOS)
+    - Discrete GPU with `PCI_EXT_CAP_ID_REBAR` capability (AMD RX 5000+ or NVIDIA RTX 20+ non-Turing)
+    - A way to back up and flash firmware (vendor utility or hardware programmer)
+    - UEFITool for injecting the FFS module
+  </Accordion>
+  <Accordion title="BIOS settings to configure after flashing">
+    - 4G Decoding (Above 4G Decoding): **Enabled**
+    - CSM: **Disabled**
+    - Resizable BAR (if present as a separate option): can be left at default — ReBarUEFI manages this
+  </Accordion>
+  <Accordion title="Optional: verify GPU ReBAR capability on Linux">
+    On Linux, you can verify that your GPU exposes the Resizable BAR extended capability before flashing anything:
+
+    ```bash
+    lspci -vvv | grep -i "resizable"
+    ```
+
+    If your GPU supports ReBAR, you will see a `Resizable BAR` entry in its capability list. You can also check the raw capability ID with:
+
+    ```bash
+    lspci -vvv | grep -A2 "0x15"
+    ```
+
+    The presence of capability ID `0x15` (`PCI_EXT_CAP_ID_REBAR`) confirms the GPU will be configured by ReBarDxe.
+  </Accordion>
+</AccordionGroup>

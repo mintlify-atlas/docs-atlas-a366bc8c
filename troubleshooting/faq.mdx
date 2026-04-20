@@ -1,0 +1,123 @@
+---
+title: "ReBarUEFI frequently asked questions"
+description: "Answers on PCIe Gen2 support, Turing GPU limits, ReBarState value selection, enabling ReBAR on Linux without flashing, and expected performance improvements."
+---
+
+The questions below cover the most common points of confusion when deploying ReBarUEFI: hardware compatibility boundaries, how the driver works internally, what values to store in the NVRAM variable, and how to get Resizable BAR working on Linux without modifying firmware at all.
+
+<AccordionGroup>
+  <Accordion title="Will it work on a PCIe Gen2 system?">
+    Possibly. Resizable BAR is a PCIe feature defined in the specification and is not strictly tied to a particular generation. It was previously assumed to be non-functional on PCIe Gen2 systems, but at least one user has confirmed it working on a system with an Intel Core i5-2500K (Sandy Bridge, PCIe Gen2).
+
+    This is not guaranteed, and results will vary by motherboard and GPU. It is worth attempting — the worst outcome is that the system fails to POST, which is recoverable by clearing CMOS.
+  </Accordion>
+
+  <Accordion title="Can I use Resizable BAR without modifying my BIOS?">
+    **On Linux:** Yes, if 4G Decoding is enabled in BIOS. Recent Linux kernels automatically resize and allocate GPU BARs during boot without any BIOS modification.
+
+    If your BIOS does not expose a 4G Decoding option, check whether it exists as a hidden setting (see the ReBarUEFI wiki page on enabling hidden 4G Decoding). If the option is genuinely absent or the ACPI DSDT is faulty, you can apply a DSDT modification and boot with the `pci=realloc` kernel parameter to achieve the same result.
+
+    **On Windows:** There is currently no known method to enable Resizable BAR on Windows without modifying the firmware. ReBarUEFI or an equivalent firmware patch is required.
+
+    <Tip>
+      If you are on Linux and simply want to enable ReBAR without touching the firmware, enable 4G Decoding in your BIOS and let the kernel handle the rest. No driver installation is needed.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="Will a BAR size smaller than the GPU's maximum still give a performance improvement?">
+    Yes. Any BAR size larger than the default 256 MB can improve performance, even if it is less than the full GPU VRAM size.
+
+    Testing on an i5-3470 with a Sapphire Nitro+ RX 580 8 GB showed up to **12% FPS improvement** using a 2 GB BAR size — well below the card's 8 GB maximum. If your firmware cannot accommodate a larger BAR due to MMIO space constraints, start with a value like `8` (256 MB) or `11` (2 GB) and measure the effect before pushing to `32` (unlimited).
+  </Accordion>
+
+  <Accordion title="I have an NVIDIA Turing GPU (RTX 20 or GTX 16 series) — can I use ReBarUEFI?">
+    No. NVIDIA Turing GPUs require additional per-GPU configuration that ReBarUEFI does not handle. Use [NvStrapsReBar](https://github.com/terminatorul/NvStrapsReBar) instead, which is purpose-built to enable Resizable BAR on Turing-generation NVIDIA hardware.
+
+    ReBarUEFI works with AMD GPUs and NVIDIA GPUs from the Ampere generation (RTX 30 series) onward, which support standard Resizable BAR capability without additional strapping.
+
+    <Warning>
+      Setting a large ReBarState value with a Turing GPU installed and no NvStraps configuration may cause the system to fail to POST. Use the correct tool for your GPU generation.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Does Secure Boot prevent flashing a modified BIOS?">
+    No. Most UEFI firmware implementations accept modified or unsigned DXE modules regardless of whether Secure Boot is enabled. Secure Boot validates the OS bootloader and kernel, not the firmware modules loaded during the DXE phase.
+
+    In practice, as the README notes, most firmware will accept unsigned or patched modules with Secure Boot on, which means you should not experience Secure Boot-related problems when running games or software that checks for it.
+
+    <Note>
+      Secure Boot operates on the OS boot path, not on firmware initialization. The DXE volume where ReBarDxe is installed executes before Secure Boot measurements are relevant.
+    </Note>
+  </Accordion>
+
+  <Accordion title="What BAR size value should I use with ReBarState?">
+    The ReBarState value sets the **maximum** BAR size the driver will attempt to configure. The driver will select the largest size the GPU actually supports, up to this maximum.
+
+    | Value | Meaning |
+    |-------|---------|
+    | `0` | Disabled |
+    | `1`–`31` | Maximum BAR size of 2^x MB (e.g., `8` = 256 MB, `11` = 2 GB, `20` = 1 TB) |
+    | `32` | Unlimited — driver uses the largest size the GPU reports |
+
+    **Recommended approach:**
+
+    <Steps>
+      <Step title="Start with value 8 (256 MB)">
+        Enter `8` in ReBarState and reboot. Confirm the system POSTs and boots normally. This verifies the firmware can handle a non-default BAR size.
+      </Step>
+      <Step title="Try value 32 (unlimited)">
+        If `8` is stable, set `32` and reboot. The driver will configure the largest BAR size the GPU's Resizable BAR capability register reports as supported.
+      </Step>
+      <Step title="Fall back if unstable">
+        If `32` causes instability, try intermediate values such as `11` (2 GB) or `20` (1 TB) to find the largest stable size for your platform.
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="How does ReBarDxe detect and set BAR sizes?">
+    ReBarDxe operates by hooking into the PCI enumeration process during firmware initialization:
+
+    <Steps>
+      <Step title="Module loads and reads ReBarState">
+        On boot, `rebarInit` reads the `ReBarState` NVRAM variable (GUID `A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE`). If the value is 0 or the variable doesn't exist, the driver exits immediately and has no effect.
+      </Step>
+      <Step title="Hooks PreprocessController">
+        The driver locates the `EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL` and replaces its `PreprocessController` function pointer with a custom implementation, saving the original.
+      </Step>
+      <Step title="Called during PCI enumeration">
+        The `PciBus` firmware module calls `PreprocessController` for each PCI device during enumeration. The hook calls the original function first, then runs ReBarDxe's logic.
+      </Step>
+      <Step title="Finds Resizable BAR extended capability">
+        For each device, the driver searches the PCIe extended capability list for `PCI_EXT_CAP_ID_REBAR` (capability ID `0x15`).
+      </Step>
+      <Step title="Sets the largest supported BAR size">
+        For each of the device's up to 6 BARs (BAR 0–5), it reads the capability register to get the bitmask of supported sizes, then writes back the largest supported size that does not exceed the configured ReBarState maximum.
+      </Step>
+    </Steps>
+
+    The `PciBus` module detects the updated BAR size and allocates MMIO space accordingly when it processes the resource requirements.
+  </Accordion>
+
+  <Accordion title="What does the ReBarState NVRAM variable store?">
+    The variable is a single-byte UEFI NVRAM entry with the following properties:
+
+    | Property | Value |
+    |----------|-------|
+    | Variable name | `ReBarState` |
+    | GUID | `A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE` |
+    | Data type | `UINT8` (1 byte) |
+    | Attributes | `NON_VOLATILE \| BOOTSERVICE_ACCESS \| RUNTIME_ACCESS` |
+
+    **Encoding:**
+
+    - `0` — ReBAR disabled
+    - `1`–`31` — maximum BAR size of 2^x MB
+    - `32` — unlimited (the driver also treats `UINT8_MAX` / 255 as unlimited for robustness)
+
+    On Linux, the variable is accessible at `/sys/firmware/efi/efivars/ReBarState-a3c5b77a-c88f-4a93-bf1c-4a92a32c65ce`. The file format prepends a 4-byte little-endian attributes field before the 1-byte value, for a total of 5 bytes.
+
+    <Note>
+      The `NON_VOLATILE` attribute means the value persists across reboots and power cycles. It is only cleared when CMOS is reset or when ReBarDxe detects a pre-2023 system clock and writes `0` back.
+    </Note>
+  </Accordion>
+</AccordionGroup>

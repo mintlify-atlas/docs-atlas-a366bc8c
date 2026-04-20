@@ -1,0 +1,129 @@
+---
+title: "DSDT modification for Sandy and Ivy Bridge"
+description: "When and how to modify the ACPI DSDT table on Sandy and Ivy Bridge systems so the OS recognizes the expanded 64 GB MMIO window required for Resizable BAR."
+---
+
+On Sandy Bridge and Ivy Bridge systems, the UEFIPatch `patches.txt` includes a patch that expands the MMIO window from 16GB to the full 64GB (36-bit) physical address space. For some motherboards this firmware patch alone is enough — but on others, the ACPI DSDT table also describes the system's MMIO resource windows, and if that description still caps the window at 16GB, the OS will refuse to use address space above that limit regardless of what the firmware's PciHostBridge module allows. On these boards, you need to modify the DSDT to match the expanded MMIO range.
+
+## What the DSDT is
+
+The **DSDT** (Differentiated System Description Table) is part of the ACPI firmware interface. It is a bytecode table compiled into your BIOS that describes hardware topology and resource assignments to the operating system. The relevant section for Resizable BAR is the MMIO resource descriptor under the PCI root bridge (`PCI0`) object, which tells the OS the range of memory-mapped addresses available for PCI device BARs.
+
+The patch in `patches.txt` that may require a DSDT modification is documented in the file as:
+
+```
+# PciHostBridge | Replace 16GB MMIO region with complete use of 64GB physical address space
+# (Sandy/Ivy Bridge). MAY REQUIRE DSDT MODIFICATION
+```
+
+<Note>
+  DSDT modification is only needed for certain Sandy/Ivy Bridge motherboards. If Resizable BAR works correctly after applying the UEFIPatch patches alone, you do not need to modify the DSDT. Try the firmware patches first and only continue here if ReBAR still fails to allocate a large BAR.
+</Note>
+
+## When to use this approach
+
+You need DSDT modification if:
+
+- You are on Sandy Bridge (2nd gen) or Ivy Bridge (3rd gen).
+- You have applied the 16GB → 64GB MMIO UEFIPatch and inserted the `ReBarDxe` FFS module.
+- Resizable BAR is still limited or non-functional after enabling 4G Decoding and disabling CSM.
+- Your BIOS doesn't expose a 4G Decoding option at all, or the DSDT is otherwise incorrect.
+
+## Modifying the DSDT
+
+<Steps>
+  <Step title="Extract the DSDT from your running system">
+    On Linux, use `acpidump` to dump all ACPI tables, then extract the DSDT:
+
+    ```bash
+    sudo acpidump -b
+    iasl -e *.dat -d dsdt.dat
+    ```
+
+    This produces a `dsdt.dsl` source file. On some distributions `acpidump` is part of the `acpica-tools` or `pmtools` package.
+
+    Alternatively, extract the DSDT directly from your firmware image using UEFITool NE: locate the ACPI table storage module, right-click the DSDT entry, and choose "Extract body".
+  </Step>
+
+  <Step title="Decompile the DSDT to ACPI source">
+    If you extracted the DSDT as a raw binary (`.aml`), decompile it with `iasl`:
+
+    ```bash
+    iasl -d dsdt.aml
+    ```
+
+    This produces a `.dsl` (ACPI Source Language) file that you can edit in any text editor.
+  </Step>
+
+  <Step title="Apply the Sandy/Ivy Bridge MMIO resource patch">
+    In the decompiled `dsdt.dsl`, locate the `PCI0` root bridge device and find the `DWordMemory` or `QWordMemory` resource descriptor that defines the MMIO window. It will contain the current 16GB upper limit.
+
+    Update the maximum address and length fields to reflect the expanded 64GB (36-bit) window. The exact values and the specific resource descriptor format vary by motherboard vendor.
+
+    <Tip>
+      For the exact patch content and example diffs for specific Sandy/Ivy Bridge motherboards, refer to the [DSDT Patching wiki page](https://github.com/xCuri0/ReBarUEFI/wiki/DSDT-Patching#sandyivy-bridge-dsdt-patch) in the ReBarUEFI repository.
+    </Tip>
+  </Step>
+
+  <Step title="Recompile the modified DSDT">
+    Recompile the patched `.dsl` back to bytecode:
+
+    ```bash
+    iasl dsdt.dsl
+    ```
+
+    Fix any compiler warnings or errors before proceeding. The output is `dsdt.aml`.
+
+    For more detail on the recompilation process, see the [Arch wiki DSDT guide](https://wiki.archlinux.org/title/DSDT#Recompiling_it_yourself).
+  </Step>
+
+  <Step title="Load the modified DSDT at boot">
+    <Tabs>
+      <Tab title="Linux (initrd override)">
+        The cleanest method on Linux is to embed the modified DSDT in an initrd early-load cpio archive:
+
+        ```bash
+        mkdir -p kernel/firmware/acpi
+        cp dsdt.aml kernel/firmware/acpi/
+        find kernel | cpio -H newc --create > dsdt.cpio
+        ```
+
+        Then prepend `dsdt.cpio` to your initrd in your bootloader configuration. For GRUB, add an `initrd` line before the main initrd entry pointing to `dsdt.cpio`.
+
+        The Arch wiki provides [detailed instructions](https://wiki.archlinux.org/title/DSDT#Using_a_modified_DSDT) for this process.
+      </Tab>
+      <Tab title="Windows">
+        Windows does not support initrd-style DSDT overrides. On Windows you must either:
+
+        - Patch the DSDT directly into the BIOS image alongside the UEFIPatch modifications (advanced — requires knowledge of ACPI table replacement in firmware volumes).
+        - Use a custom UEFI shell script or driver to override the table at runtime (not officially supported).
+
+        For most users on Windows, patching the BIOS firmware directly is the practical path.
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+## Linux alternative: avoid BIOS modification entirely
+
+If you are running Linux, you may not need to modify the BIOS at all.
+
+<Tip>
+  Recent Linux kernel versions (5.12+) automatically resize and reallocate GPU BARs when **4G Decoding is enabled** in the BIOS. If your BIOS exposes the 4G Decoding option (check [hidden settings](https://github.com/xCuri0/ReBarUEFI/wiki/Enabling-hidden-4G-decoding) if it isn't visible), enabling it and booting Linux may be sufficient.
+</Tip>
+
+If your BIOS lacks 4G Decoding or has a faulty DSDT, you can still get Resizable BAR on Linux by:
+
+1. Applying the DSDT modification described above and loading it via initrd.
+2. Adding `pci=realloc` to your kernel command line, which forces the kernel to reassign PCI BARs and can work around firmware resource allocation bugs.
+
+```
+# Example GRUB kernel parameters
+GRUB_CMDLINE_LINUX_DEFAULT="quiet pci=realloc"
+```
+
+<Note>
+  `pci=realloc` alone does not substitute for fixing an incorrect DSDT MMIO resource descriptor. If your DSDT caps the MMIO window at 16GB, the kernel cannot allocate addresses above that limit regardless of the `pci=realloc` flag. Use both the DSDT modification and `pci=realloc` together on affected Sandy/Ivy Bridge boards.
+
+  There is currently no known method to enable Resizable BAR on Windows without a BIOS firmware modification.
+</Note>

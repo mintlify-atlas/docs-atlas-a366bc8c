@@ -1,0 +1,104 @@
+---
+title: "Add ReBarDxe FFS module to UEFI firmware"
+description: "Inject the ReBarDxe FFS module into your motherboard's DXE firmware volume using UEFITool to enable Resizable BAR support on unsupported systems."
+---
+
+The ReBarDxe driver must be embedded directly in your motherboard's firmware so it executes on every boot, before the operating system loads. This is done by inserting a pre-built FFS (Firmware File System) module into the DXE (Driver Execution Environment) volume of your firmware image using UEFITool. Once in place, the module intercepts PCI enumeration and applies the BAR size stored in the `ReBarState` NVRAM variable.
+
+## What is an FFS module?
+
+UEFI firmware is organized as a collection of volumes, each containing typed files in the Firmware File System format. The DXE volume holds drivers that run early in the boot process — before any operating system takes control. By inserting `ReBarDxe.ffs` into this volume, the module runs automatically on every boot and hooks into the `PciHostBridgeResourceAllocationProtocol` to enable Resizable BAR.
+
+The ReBarDxe module carries the GUID `a8ee1777-a4f5-4345-9da4-13742084d31e`.
+
+## Prerequisites
+
+<CardGroup cols={3}>
+  <Card title="UEFITool NE" icon="wrench" href="https://github.com/LongSoft/UEFITool">
+    Download the New Engine (NE) release from the LongSoft GitHub releases page. The classic engine does not support inserting modules.
+  </Card>
+  <Card title="Firmware dump" icon="microchip">
+    A full dump of your motherboard's firmware. Use the motherboard vendor's backup utility, a hardware programmer, or a flashing tool that supports full ROM extraction.
+  </Card>
+  <Card title="ReBarDxe.ffs" icon="file">
+    Download the pre-built `ReBarDxe.ffs` from the [ReBarUEFI releases](https://github.com/xCuri0/ReBarUEFI/releases) page, or build it yourself from source using `buildffs.py` inside an EDK2 tree.
+  </Card>
+</CardGroup>
+
+<Warning>
+Back up your original firmware file before making any modifications. Store the backup on a separate drive or USB stick. If the modified firmware causes your system to fail to POST, you will need this backup to recover.
+</Warning>
+
+## Inserting the module
+
+<Steps>
+  <Step title="Download UEFITool NE">
+    Go to the [UEFITool releases page](https://github.com/LongSoft/UEFITool/releases) and download the latest **NE** (New Engine) build for your operating system. Extract the archive and launch `UEFITool`.
+
+    <Note>
+      Use the New Engine (NE) variant, not the classic release. Only NE supports the insert operations required here.
+    </Note>
+  </Step>
+
+  <Step title="Open your firmware file">
+    Select **File → Open image file** and choose your motherboard's firmware dump. UEFITool will parse the image and display the firmware volume tree in the left panel.
+  </Step>
+
+  <Step title="Locate the DXE volume">
+    To find the correct insertion point, search for the `PciBus` module as a reference — it is a DXE driver that runs during PCI enumeration, which is the same phase where ReBarDxe needs to be present.
+
+    1. Press **Ctrl+F** to open the search dialog.
+    2. Switch to the **Text** tab and search for `PciBus`.
+    3. Double-click the result to navigate to the `PciBus` file in the tree.
+    4. This DXE driver is inside the DXE volume where you will insert the new module.
+  </Step>
+
+  <Step title="Insert ReBarDxe.ffs">
+    Right-click the `PciBus` file (or any other DXE driver in the same volume) and select **Insert after**. In the file dialog, select `ReBarDxe.ffs`.
+
+    UEFITool will show the new file appended in the tree with a yellow highlight indicating a pending modification.
+  </Step>
+
+  <Step title="Verify the insertion">
+    After inserting, confirm that `ReBarDxe.ffs` appears in the DXE volume tree. You can also search for the GUID `a8ee1777-a4f5-4345-9da4-13742084d31e` using the **GUID** search tab to verify the module is present and correctly placed.
+
+    <Tip>
+      Run the search before saving as well as after saving to confirm the GUID appears in the output image — this catches any cases where the insert did not persist correctly.
+    </Tip>
+  </Step>
+
+  <Step title="Check pad files">
+    Before saving, inspect the firmware tree for any **pad files** that have changed (they will be highlighted). Pad files are alignment structures within firmware volumes; if they have been modified, the resulting image may fail to flash or boot.
+
+    <Warning>
+      If UEFITool reports that pad files have changed, do not use this modified image directly. Apply the pad file workaround described in the ReBarUEFI wiki before proceeding.
+    </Warning>
+  </Step>
+
+  <Step title="Save the modified firmware">
+    Select **File → Save image file** and write the modified image to a new file (for example, `firmware_rebar.bin`). Do not overwrite your original backup.
+  </Step>
+
+  <Step title="Flash using your motherboard's update utility">
+    Use your motherboard vendor's BIOS update utility (such as EZ Flash, M-Flash, or Q-Flash) to flash the modified firmware file. Follow the vendor's standard flashing procedure.
+
+    After flashing, enter BIOS setup and verify that **Above 4G Decoding is enabled** and **CSM is disabled** before booting into the operating system.
+  </Step>
+</Steps>
+
+## After flashing
+
+Once your system boots with the modified firmware, the ReBarDxe module is active. Continue to the next steps:
+
+<CardGroup cols={2}>
+  <Card title="Configure BAR size" icon="sliders" href="/installation/rebarstate">
+    Run the ReBarState utility to set your desired maximum BAR size in NVRAM.
+  </Card>
+  <Card title="Enable 4G Decoding" icon="toggle-right" href="/installation/enabling-4g-decoding">
+    Ensure Above 4G Decoding is enabled in BIOS — required for BAR sizes above 1 GB.
+  </Card>
+</CardGroup>
+
+<Note>
+Most motherboard firmware accepts unsigned DXE modules even when Secure Boot is enabled. You should not encounter Secure Boot-related boot failures from adding ReBarDxe.ffs.
+</Note>

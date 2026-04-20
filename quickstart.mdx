@@ -1,80 +1,173 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Get started with ReBarUEFI"
+description: "End-to-end walkthrough: download ReBarDxe, configure BIOS, inject the FFS module, flash modified firmware, and set your BAR size with ReBarState."
 ---
 
-## Get started in three steps
+This guide walks you through enabling Resizable BAR on your system using ReBarUEFI — from downloading the driver to verifying ReBAR is active after reboot. Complete each step in order; skipping BIOS configuration or the firmware backup steps can result in a system that will not POST.
 
-Get your documentation site running locally and make your first customization.
+<Warning>
+  **Back up your current firmware before making any changes.** Flashing a modified firmware image without a backup leaves you no recovery path if something goes wrong. Use your motherboard vendor's backup utility, a hardware programmer, or UEFITool's save function to export the current image first.
+</Warning>
 
-### Step 1: Set up your local environment
+<Steps>
+  <Step title="Download ReBarDxe.ffs">
+    Download the latest `ReBarDxe.ffs` from the [ReBarUEFI GitHub Releases](https://github.com/xCuri0/ReBarUEFI/releases) page. This is the prebuilt UEFI DXE driver module that you will inject into your firmware image.
+
+    Also download `ReBarState` for your operating system from the same releases page:
+    - **Windows**: `ReBarState.exe`
+    - **Linux**: build from source using CMake, or check the releases page for a prebuilt binary
+
+    <Note>
+      Most firmware will accept the unsigned `ReBarDxe.ffs` module even with Secure Boot enabled. You should not need to disable Secure Boot to flash or run the driver.
+    </Note>
+  </Step>
+
+  <Step title="Configure BIOS settings">
+    Before modifying your firmware, set the following options in your UEFI setup utility:
+
+    | Setting | Required value |
+    |---|---|
+    | Above 4G Decoding / 4G Decoding | **Enabled** |
+    | CSM (Compatibility Support Module) | **Disabled** |
+
+    <Info>
+      If you cannot find an Above 4G Decoding option, it may be hidden in your firmware. See [Enabling 4G Decoding](/installation/enabling-4g-decoding) for platform-specific instructions. Without 4G Decoding, your maximum usable BAR size will be capped at 1 GB (or 512 MB on some boards).
+    </Info>
+  </Step>
+
+  <Step title="Back up your current firmware">
+    Export a copy of your current, unmodified firmware image before proceeding. Store the backup somewhere safe — on a different drive or machine.
+
+    <Tabs>
+      <Tab title="Windows">
+        Use your motherboard vendor's BIOS update utility (ASUS EZ Flash, MSI M-Flash, Gigabyte @BIOS, etc.) to save the current firmware to a USB drive. Alternatively, open UEFITool, go to **File → Open image file**, then **File → Save image file** to export the loaded image.
+      </Tab>
+      <Tab title="Linux">
+        ```bash
+        # Read the current firmware using flashrom (requires root)
+        sudo flashrom -p internal -r firmware_backup.rom
+        ```
+
+        Verify the backup is valid by checking its file size matches your chip size (typically 8 MB, 16 MB, or 32 MB).
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Inject ReBarDxe.ffs using UEFITool">
+    Open your firmware backup in [UEFITool](https://github.com/LongSoft/UEFITool) and add the `ReBarDxe.ffs` module to the DXE volume. The detailed procedure — including how to locate the correct DXE volume and handle any required UEFIPatch fixes for your platform — is covered in [Adding the FFS module](/installation/adding-ffs-module).
+
+    After adding the module, save the modified firmware image to a new file (do not overwrite your backup).
+
+    <Tip>
+      If UEFITool reports that pad files were changed after applying a UEFIPatch, use the available workaround described in the [UEFI Patching](/patching/using-uefipatch) guide before saving.
+    </Tip>
+  </Step>
+
+  <Step title="Flash the modified firmware">
+    Flash the modified firmware image to your motherboard using your vendor's update utility or a hardware programmer.
+
+    <Warning>
+      Do not power off or restart your system during the flash process. A failed or interrupted flash can leave your board in an unbootable state. Use a reliable power source and close all other applications.
+    </Warning>
+
+    After flashing, the system will reboot. Re-enter your UEFI setup utility and confirm that **Above 4G Decoding is enabled** and **CSM is disabled**. These settings sometimes reset after a firmware update.
+  </Step>
+
+  <Step title="Set your BAR size with ReBarState">
+    Once running the modified firmware, run `ReBarState` to write the `ReBarState` UEFI variable that controls the maximum BAR size ReBarDxe will configure.
+
+    <Tabs>
+      <Tab title="Windows">
+        Right-click `ReBarState.exe` and select **Run as administrator**. If you run it without elevation, it will fail to obtain `SE_SYSTEM_ENVIRONMENT_NAME` and will not be able to read or write the UEFI variable.
+      </Tab>
+      <Tab title="Linux">
+        ```bash
+        sudo ./ReBarState
+        ```
+
+        Root access is required to read and write EFI variables under `/sys/firmware/efi/efivars/`.
+      </Tab>
+    </Tabs>
+
+    The utility displays the current state and prompts you to enter a new value:
+
+    ```text
+    ReBarState (c) 2023 xCuri0
+
+    Current ReBarState 0 / Disabled
+
+    Verify that 4G Decoding is enabled and CSM is disabled otherwise system will not POST with GPU. If your ReBarState value keeps getting reset then check your system time.
+
+    It is recommended to first try smaller sizes above 256MB in case BIOS doesn't support large BARs.
+
+    Enter ReBarState Value
+          0: Disabled
+    Above 0: Maximum BAR size set to 2^x MB
+         32: Unlimited BAR size
+    ```
+
+    Enter your desired value and press Enter. Common values:
+
+    | Value | BAR size |
+    |---|---|
+    | `0` | Disabled |
+    | `8` | 256 MB |
+    | `9` | 512 MB |
+    | `10` | 1 GB |
+    | `11` | 2 GB |
+    | `32` | Unlimited |
+
+    <Tip>
+      Start with a smaller value such as `8` (256 MB) or `9` (512 MB) before setting `32`. Some older firmware versions do not handle very large BARs correctly, and a smaller size lets you confirm the setup is working before going unlimited. If `32` causes a boot failure, clear CMOS to reset `ReBarState` to `0`.
+    </Tip>
+
+    After writing the value, `ReBarState` will confirm success:
+
+    ```text
+    Successfully wrote ReBarState UEFI variable
+
+    Reboot for changes to take effect
+    ```
+  </Step>
+
+  <Step title="Reboot and verify ReBAR is active">
+    Reboot your system. ReBarDxe will read the `ReBarState` variable during the DXE phase and configure the GPU BAR before the OS loads.
+
+    Verify that Resizable BAR is active:
+
+    <Tabs>
+      <Tab title="Windows">
+        Open GPU-Z and check the **Resizable BAR** field in the Advanced tab. It should show **Enabled** with a size matching your configured value (or larger if you used `32`).
+
+        In AMD Software or NVIDIA Control Panel, Resizable BAR / Smart Access Memory status is shown in the system information panel.
+      </Tab>
+      <Tab title="Linux">
+        ```bash
+        # Check dmesg for BAR allocation messages
+        dmesg | grep -i "bar"
+
+        # Check the GPU BAR size via lspci
+        lspci -vvv -d ::0300 | grep -A4 "Memory at"
+        ```
+
+        The memory region size reported for BAR 0 should reflect your configured maximum (e.g., 8 GB for a full 8 GB GPU framebuffer with `32`).
+      </Tab>
+    </Tabs>
+
+    If the system does not boot after setting a large BAR size, clear CMOS. This resets the system clock, which ReBarDxe detects as a CMOS clear event and uses to automatically disable itself by setting `ReBarState` back to `0`.
+  </Step>
+</Steps>
+
+## Troubleshooting
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
+  <Accordion title="System does not POST after enabling ReBAR">
+    Clear CMOS by removing the CMOS battery for 30 seconds or using the CLR_CMOS jumper on your motherboard. ReBarDxe detects the cleared clock and disables itself automatically. After clearing CMOS, re-enter the BIOS, confirm 4G Decoding is enabled and CSM is disabled, then try a smaller `ReBarState` value.
   </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
+  <Accordion title="ReBarState value resets after every reboot">
+    If `ReBarState` keeps resetting to `0`, check your system time in BIOS. ReBarDxe interprets a year before 2023 as a CMOS reset and clears the variable. Correct the system clock and the value will persist.
+  </Accordion>
+  <Accordion title="ReBarState fails with GetLastError: 5 on Windows">
+    Error 5 is `ERROR_ACCESS_DENIED` from `SetFirmwareEnvironmentVariableEx`. This usually means a firmware NVRAM whitelist is rejecting the write. Apply the **Remove NVRAM whitelist** UEFIPatch pattern for your firmware — see [UEFI Patching](/patching/overview) — then reflash and retry.
   </Accordion>
 </AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,97 +1,69 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "ReBarUEFI: Resizable BAR for any UEFI system"
+description: "Enable Resizable BAR on older motherboards using a UEFI DXE driver. Unlock full GPU framebuffer access and improve gaming performance on unsupported platforms."
 ---
 
-## Setting up
+ReBarUEFI is an open-source UEFI DXE driver that enables Resizable BAR (ReBAR) on systems that lack official firmware support. By injecting a lightweight driver into your UEFI firmware's DXE volume, ReBarUEFI configures PCIe Base Address Register sizing during boot — delivering the same GPU performance improvements officially supported systems enjoy.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Flash the driver and enable Resizable BAR on your system in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Requirements" icon="list-check" href="/requirements">
+    Check hardware and firmware prerequisites before you begin
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Adding the FFS Module" icon="microchip" href="/installation/adding-ffs-module">
+    Step-by-step guide to injecting ReBarDxe into your UEFI firmware
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="UEFI Patching" icon="wrench" href="/patching/overview">
+    Fix 64-bit BAR handling issues in older firmware with UEFIPatch
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What is Resizable BAR?
 
-Everything you need to create world-class documentation.
+Resizable BAR (ReBAR) is a PCIe feature that allows the CPU to access the entire GPU framebuffer at once instead of in 256 MB chunks. Most modern motherboards support it natively, but many older systems with PCIe-capable CPUs and GPUs are artificially locked out by their firmware.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+ReBarUEFI removes that limitation by hooking into the UEFI PCI enumeration process and configuring BAR sizes according to your settings — with no permanent BIOS modification required beyond injecting the driver module.
 
-## Need inspiration?
+<Note>
+  Intel Arc GPUs **require** Resizable BAR to function optimally. ReBarUEFI is an effective solution for older platforms that pair an Arc GPU with a motherboard that predates official ReBAR support.
+</Note>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+## How it works
+
+<Steps>
+  <Step title="Build or download the FFS module">
+    Get the prebuilt `ReBarDxe.ffs` from the [GitHub Releases](https://github.com/xCuri0/ReBarUEFI/releases) page, or build it yourself from source using the provided EDK2 build script.
+  </Step>
+  <Step title="Inject the driver into your UEFI firmware">
+    Use UEFITool to open your motherboard's firmware image and add the FFS module to the DXE volume. Apply any needed UEFIPatch fixes for your platform.
+  </Step>
+  <Step title="Flash the modified firmware">
+    Flash the patched firmware to your motherboard using the vendor's update tool or a hardware programmer. Enable 4G Decoding and disable CSM in BIOS settings.
+  </Step>
+  <Step title="Configure the BAR size with ReBarState">
+    Run the `ReBarState` utility (Windows or Linux) to set your desired maximum BAR size. Value `32` enables unlimited BAR sizing for full performance.
+  </Step>
+</Steps>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Broad compatibility" icon="server">
+    Works on Sandy Bridge through modern platforms. Tested on X99, Z170, Z270, Z370, and many others.
+  </Card>
+  <Card title="Safe by design" icon="shield-check">
+    Detects CMOS resets and automatically disables ReBAR if the system clock is cleared, preventing boot failures.
+  </Card>
+  <Card title="Windows and Linux support" icon="display">
+    The ReBarState configuration utility runs on both Windows (requires admin) and Linux (requires root).
+  </Card>
+  <Card title="UEFI patch library" icon="puzzle-piece">
+    Bundled UEFIPatch patterns fix BAR size limits, 64-bit BAR downgrades, and MMIO space constraints in older firmware.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Start with a smaller BAR size (e.g., value `8` = 256 MB) to verify stability before setting `32` for unlimited sizing. This is especially recommended for systems with older firmware that may not handle large BARs correctly.
+</Tip>

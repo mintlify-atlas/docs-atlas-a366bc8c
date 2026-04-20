@@ -1,0 +1,101 @@
+---
+title: "ReBarUEFI architecture and boot flow"
+description: "How ReBarDxe integrates into UEFI firmware as a DXE driver, communicates with ReBarState over NVRAM, and hooks PCI enumeration to configure Resizable BAR."
+---
+
+ReBarUEFI is split into two components that work together across the boundary between runtime firmware and the booted operating system. `ReBarDxe` is a UEFI DXE driver compiled into (or injected into) the firmware image; it runs automatically on every boot before the OS loader starts. `ReBarState` is a user-space utility that runs inside Windows or Linux and writes a single NVRAM variable to tell the driver what BAR size limit to enforce on the next reboot. The two components never run at the same time — they communicate exclusively through UEFI NVRAM.
+
+## Components
+
+<CardGroup cols={2}>
+  <Card title="ReBarDxe" icon="cpu">
+    A UEFI DXE driver embedded in the firmware image. Runs on every boot during the DXE phase, reads the `ReBarState` NVRAM variable, and hooks the PCI host bridge resource allocation protocol to configure Resizable BAR before the OS loads.
+  </Card>
+  <Card title="ReBarState" icon="sliders">
+    A user-space utility for Windows and Linux. Reads and writes the `ReBarState` UEFI NVRAM variable so the user can enable, disable, or set a maximum BAR size limit. Changes take effect on the next reboot.
+  </Card>
+</CardGroup>
+
+## Module identity
+
+The DXE driver is described by `ReBarDxe.inf`:
+
+| Field | Value |
+|---|---|
+| `BASE_NAME` | `ReBarDxe` |
+| `FILE_GUID` | `adf0508f-a992-4a0f-8b54-0291517c21aa` |
+| `MODULE_TYPE` | `DXE_DRIVER` |
+| `ENTRY_POINT` | `rebarInit` |
+| `VERSION_STRING` | `1.0` |
+| Dependency expression | `gEfiPciRootBridgeIoProtocolGuid` |
+
+The driver declares `gEfiPciRootBridgeIoProtocolGuid` and `gEfiPciHostBridgeResourceAllocationProtocolGuid` as `SOMETIMES_CONSUMES` protocols; both are opened only when `ReBarState` is non-zero.
+
+## Boot flow
+
+The following diagram shows the complete sequence from firmware load to OS handoff:
+
+```text
+Firmware power-on
+        │
+        ▼
+DXE phase: firmware loads DXE drivers from DXE volume
+        │
+        ▼
+rebarInit() — driver entry point
+        │
+        ├─ GetVariable("ReBarState") → reads NVRAM
+        │         │
+        │         └─ if EFI_BUFFER_TOO_SMALL or other error → reBarState = 0
+        │
+        ├─ if reBarState == 0 → return EFI_SUCCESS (disabled, no-op)
+        │
+        ├─ GetTime() → read RTC year
+        │         │
+        │         └─ if year < BUILD_YEAR (2023) → CMOS reset detected
+        │                   └─ SetVariable("ReBarState", 0) → reset variable
+        │                   └─ return EFI_SUCCESS
+        │
+        └─ pciHostBridgeResourceAllocationProtocolHook()
+                  │
+                  └─ LocateHandleBuffer(EfiPciHostBridgeResourceAllocationProtocol)
+                  └─ OpenProtocol → obtain pciResAlloc pointer
+                  └─ save o_PreprocessController
+                  └─ replace PreprocessController with PreprocessControllerOverride
+                            │
+        ┌─────────────────────────────────┐
+        │  PCI bus enumeration (PciBusDxe) │
+        └─────────────────────────────────┘
+                  │
+                  └─ PreprocessControllerOverride called per device per phase
+                            │
+                            ├─ call o_PreprocessController (original)
+                            │
+                            └─ if Phase <= EfiPciBeforeResourceCollection
+                                      └─ reBarSetupDevice()
+                                                │
+                                                └─ pciFindExtCapability(PCI_EXT_CAP_ID_REBAR)
+                                                └─ for each BAR 0–5:
+                                                       pciRebarGetPossibleSizes()
+                                                       pciRebarSetSize() → write to PCI config space
+        │
+        ▼
+PciBus allocates memory resources using the updated BAR sizes
+        │
+        ▼
+OS boot loader starts
+```
+
+## Key design decisions
+
+<AccordionGroup>
+  <Accordion title="Why hook PreprocessController?">
+    The `EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL` is the standard UEFI interface through which `PciBusDxe` drives PCI bus enumeration. By replacing the `PreprocessController` function pointer in-place on the live protocol instance, `ReBarDxe` intercepts every call the bus driver makes for each discovered device without needing to modify the original `PciBusDxe` module.
+  </Accordion>
+  <Accordion title="Why is reBarSetupDevice called twice?">
+    The source comment in `PreprocessControllerOverride` explicitly notes: "EDK2 PciBusDxe setups Resizable BAR twice so we will do same." The hook therefore calls `reBarSetupDevice` on every invocation where `Phase <= EfiPciBeforeResourceCollection`, matching the behaviour of the reference EDK2 implementation.
+  </Accordion>
+  <Accordion title="CMOS reset detection">
+    If the CMOS battery dies or the user clears CMOS, the RTC year reverts to a value well before 2023. The driver detects this, resets `ReBarState` to 0 in NVRAM, and exits without hooking anything — preventing a system that may have been left in an unknown BIOS state from getting stuck during POST with a large BAR it cannot handle.
+  </Accordion>
+</AccordionGroup>

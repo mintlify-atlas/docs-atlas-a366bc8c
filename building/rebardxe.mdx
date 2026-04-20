@@ -1,0 +1,167 @@
+---
+title: "Build ReBarDxe UEFI driver from source"
+description: "Compile the ReBarDxe UEFI DXE driver and package it as an FFS module using the EDK2 toolchain and the included buildffs.py script."
+---
+
+ReBarDxe is a UEFI DXE driver that hooks `PciHostBridgeResourceAllocationProtocol` to enable Resizable BAR on systems without official support. Building it from source requires an EDK2 tree and produces a `.ffs` module ready to be injected into your firmware image.
+
+<Tip>
+  Prebuilt releases are available on the [GitHub Releases page](https://github.com/xCuri0/ReBarUEFI/releases) if you don't need to modify the source and want to skip the build process.
+</Tip>
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="EDK2 tree" icon="code-branch">
+    A cloned copy of [tianocore/edk2](https://github.com/tianocore/edk2) with its environment initialised. ReBarUEFI must be cloned inside this tree.
+  </Card>
+  <Card title="Python 3 + pefile" icon="python">
+    Python 3 with the `pefile` package installed. The build script uses it to patch the NX_COMPAT flag in the PE header.
+  </Card>
+  <Card title="Build toolchain" icon="wrench">
+    GCC (Linux/macOS) or MSVC (Windows), plus NASM. The toolchain must be detected by EDK2's build system.
+  </Card>
+  <Card title="EDK2 build environment" icon="terminal">
+    The EDK2 environment script (`edksetup.sh` on Linux/macOS, `edksetup.bat` on Windows) must be sourced before building.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Install the `pefile` package before running `buildffs.py`. Without it the script will fail immediately with an import error.
+
+  ```bash
+  pip install pefile
+  ```
+</Warning>
+
+## Module details
+
+The driver is defined in `ReBarDxe/ReBarDxe.inf`. The key fields are:
+
+| Field | Value |
+|---|---|
+| `BASE_NAME` | `ReBarDxe` |
+| `FILE_GUID` | `adf0508f-a992-4a0f-8b54-0291517c21aa` |
+| `MODULE_TYPE` | `DXE_DRIVER` |
+| `ENTRY_POINT` | `rebarInit` |
+| `SUPPORTED_ARCHITECTURES` | `X64` |
+
+The driver depends on two protocols at runtime:
+
+- `gEfiPciRootBridgeIoProtocolGuid`
+- `gEfiPciHostBridgeResourceAllocationProtocolGuid`
+
+The DEPEX expression requires `gEfiPciRootBridgeIoProtocolGuid` to be installed before the driver runs, ensuring it is dispatched after the PCI root bridge driver.
+
+## Build steps
+
+<Steps>
+  <Step title="Clone ReBarUEFI inside your EDK2 tree">
+    The build platform path in `ReBar.dsc` is relative to the EDK2 root, so ReBarUEFI must sit directly inside it.
+
+    ```bash
+    cd /path/to/edk2
+    git clone https://github.com/xCuri0/ReBarUEFI
+    ```
+  </Step>
+  <Step title="Initialise the EDK2 build environment">
+    ```bash
+    # Linux / macOS
+    . edksetup.sh
+
+    # Windows
+    edksetup.bat
+    ```
+  </Step>
+  <Step title="Run buildffs.py">
+    Run the script from inside the `ReBarDxe` directory. The script changes up two levels to the EDK2 root automatically before invoking `build`.
+
+    ```bash
+    cd ReBarUEFI/ReBarDxe
+    python3 buildffs.py
+    ```
+
+    To build a DEBUG driver instead of the default RELEASE:
+
+    ```bash
+    python3 buildffs.py DEBUG
+    ```
+  </Step>
+  <Step title="Locate the output">
+    On success the script prints `Finished` and the `.ffs` file is written next to `ReBarDxe.efi` under:
+
+    ```
+    Build/ReBarUEFI/<BUILDTYPE>_<TOOLCHAIN>/X64/ReBarDxe.ffs
+    ```
+  </Step>
+</Steps>
+
+## What buildffs.py does
+
+The script automates the steps that turn a compiled `.efi` binary into an FFS module suitable for firmware injection.
+
+<Steps>
+  <Step title="Invoke the EDK2 build system">
+    Runs `build --platform=ReBarUEFI/ReBarDxe/ReBar.dsc` from the EDK2 root. The platform file targets `X64` and supports `DEBUG`, `RELEASE`, and `NOOPT` build types.
+  </Step>
+  <Step title="Locate the compiled EFI binary">
+    Uses a glob pattern to find `ReBarDxe.efi` under `Build/ReBarUEFI/<BUILDTYPE>_*/X64/`. If exactly one file is not found the script exits with an error.
+  </Step>
+  <Step title="Set the NX_COMPAT flag">
+    Opens the EFI binary with `pefile`, sets bit 8 of `OPTIONAL_HEADER.DllCharacteristics` (the `IMAGE_DLLCHARACTERISTICS_NX_COMPAT` flag), and writes the modified binary back in place.
+  </Step>
+  <Step title="Create PE32 and name sections with GenSec">
+    ```
+    GenSec -o pe32.sec  ReBarDxe.efi  -S EFI_SECTION_PE32
+    GenSec -o name.sec               -S EFI_SECTION_USER_INTERFACE -n ReBarDxe
+    ```
+  </Step>
+  <Step title="Package into an FFS file with GenFfs">
+    ```
+    GenFfs -g a8ee1777-a4f5-4345-9da4-13742084d31e \
+           -o ReBarDxe.ffs \
+           -i pe32.sec -i name.sec \
+           -t EFI_FV_FILETYPE_DRIVER --checksum
+    ```
+
+    The resulting `ReBarDxe.ffs` carries the GUID `a8ee1777-a4f5-4345-9da4-13742084d31e`. The intermediate `pe32.sec` and `name.sec` files are removed after packaging.
+  </Step>
+</Steps>
+
+## Build options
+
+The `.inf` file sets compiler flags per toolchain:
+
+<Tabs>
+  <Tab title="GCC">
+    ```
+    CC_FLAGS:    -flto -DUSING_LTO -Wextra -Wno-unused-parameter
+    DLINK_FLAGS: -flto
+    ```
+
+    RELEASE builds additionally define `-DMDEPKG_NDEBUG`, which disables debug assertions and produces a smaller binary.
+  </Tab>
+  <Tab title="MSVC">
+    ```
+    CC_FLAGS:    /GL /DUSING_LTO /analyze /W4
+    DLINK_FLAGS: /LTCG /NOCOFFGRPINFO /BASE:0x180000000
+    ```
+
+    RELEASE builds additionally define `/D MDEPKG_NDEBUG`.
+  </Tab>
+  <Tab title="Clang (CLANGPDB)">
+    Inherits the GCC flags and adds a broader set of Clang-specific warnings:
+
+    ```
+    -Weverything -Wno-documentation -Wno-missing-variable-declarations
+    -Wno-missing-prototypes -Wno-reserved-macro-identifier
+    -Wno-gnu-zero-variadic-macro-arguments -Wno-padded
+    -Wno-reserved-identifier -Wno-strict-prototypes
+    -Wno-documentation-pedantic -Wno-unused-macros
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  RELEASE is the default build type and produces a smaller, optimised driver with LTO applied and debug assertions removed. Use DEBUG only if you need to diagnose driver behaviour.
+</Note>

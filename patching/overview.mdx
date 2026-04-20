@@ -1,0 +1,133 @@
+---
+title: "UEFI firmware patches for Resizable BAR"
+description: "All UEFIPatch patterns in ReBarUEFI: remove BAR size caps, prevent 64-bit BAR demotion, expand MMIO windows, and unlock NVRAM writes on older UEFI firmware."
+---
+
+Many older UEFI firmwares contain artificial limits that prevent Resizable BAR from working correctly: they cap BAR allocations at 4GB or 16GB, downgrade 64-bit BARs to 32-bit, or restrict the MMIO address space to a range too small for modern GPU memory. The patches in `UEFIPatch/patches.txt` (and the platform-specific supplementary files) target these specific code patterns in known UEFI modules and replace them with corrected logic, without requiring a full firmware rebuild.
+
+## Why patches are needed
+
+Two UEFI modules are primarily responsible for BAR allocation: **PciHostBridge**, which manages the host-side memory-mapped I/O address space, and **PciBus**, which enumerates PCI devices and assigns BAR resources. Bugs or intentional restrictions in either module can silently cap the BAR size your GPU receives, even if Resizable BAR hardware support is present.
+
+Common problems addressed by these patches:
+
+<CardGroup cols={2}>
+  <Card title="BAR size caps" icon="scissors">
+    PciBus or PciHostBridge enforce an upper bound (4GB, 16GB, or 64GB) on the largest BAR that can be allocated.
+  </Card>
+  <Card title="64-bit BAR demotion" icon="arrow-down">
+    PciBus downgrades 64-bit prefetchable BARs to 32-bit, limiting them to the lower 4GB of address space.
+  </Card>
+  <Card title="Restricted MMIO window" icon="window">
+    PciHostBridge only maps a 16GB or 64GB MMIO region, leaving no room for large BARs even if other limits are removed.
+  </Card>
+  <Card title="NVRAM whitelist" icon="lock">
+    Some firmwares whitelist which NVRAM variables can be written, blocking ReBarState from saving its setting.
+  </Card>
+</CardGroup>
+
+## Patch reference
+
+The patches are organized below by the UEFI module they target. Each entry lists the firmware GUID, the platforms it applies to, and what the patch does.
+
+<AccordionGroup>
+  <Accordion title="PciHostBridge patches (GUID 8D6756B9-E55E-4D6A-A3A5-5E4D72DDF772)">
+
+    | # | Description | Platforms |
+    |---|-------------|-----------|
+    | 1 | Remove `<4GB` BAR size limit in `SubmitResources` | Sandy Bridge, Ivy Bridge |
+    | 2 | Replace 16GB MMIO region with 64GB address space — **may require DSDT modification** | Sandy Bridge, Ivy Bridge |
+    | 3 | Replace 64GB MMIO region with 512GB (39-bit) address space | Skylake, Kaby Lake, Coffee Lake |
+    | 4 | Fix `AddMemorySpace` call | Sandy Bridge, Ivy Bridge |
+    | 5 | Remove 4GB limit for `PciRootBridgeIo.Mem` (two byte-pattern variants) | Sandy Bridge, Ivy Bridge |
+
+    <Note>
+      Patch #2 expands the MMIO window from 16GB to 64GB. On certain Sandy/Ivy Bridge motherboards this also requires a matching DSDT table modification. See [DSDT modification for Sandy and Ivy Bridge](/patching/dsdt-patching) for details.
+    </Note>
+
+    Haswell/Broadwell systems use a separate supplementary file (`HswAbove4G.txt`) that includes:
+
+    - An NBPEI patch correcting `EFI_HOB_TYPE_CPU SizeOfMemorySpace` from 36-bit to 39-bit (512GB)
+    - A PciHostBridge patch replacing the 32/48–63GB MMIO region with the full 512GB address space
+    - A PciHostBridge patch replacing the 8–16GB MMIO region with the full 512GB address space (may require DSDT modification)
+    - A replacement patch for an older 64GB-limited Haswell/Broadwell variant
+
+  </Accordion>
+
+  <Accordion title="PciBus patches (GUID 3C1DE39F-D207-408A-AACC-731CFB7F1DD7)">
+
+    | # | Description | Platforms |
+    |---|-------------|-----------|
+    | 1 | Remove `<16GB` BAR size limit | Sandy Bridge, Ivy Bridge, Haswell, Broadwell |
+    | 2 | Remove `<64GB` BAR size limit | Skylake, Kaby Lake, Coffee Lake |
+    | 3 | Don't downgrade 64-bit BARs to 32-bit | Haswell, Broadwell |
+    | 4 | Don't downgrade 64-bit BARs to 32-bit (alternate pattern by @Mak3rde) | Haswell, Broadwell |
+
+    Patches #3 and #4 address the same underlying problem via different byte patterns — only one will match your firmware. Both are safe to include; UEFIPatch skips patterns it cannot find.
+
+  </Accordion>
+
+  <Accordion title="NVRAM whitelist patches">
+
+    | # | GUID | Description | Platforms |
+    |---|------|-------------|-----------|
+    | 1 | `54B070F3-9EB8-47CC-ADAF-39029C853CBB` | AMI APTIO V `NvramSmiDxe` whitelist unlock | X99, Socket 2011-v3 (C612 chipset) |
+    | 2 | `842A454A-75E5-408B-8B1C-36420E4E3F21` | `NvramSmi` whitelist unlock (by @vit9696) | General |
+
+    These patches are needed when ReBarState exits with `GetLastError: 5` (access denied). They remove the firmware's NVRAM variable whitelist restriction so that the `ReBarState` variable can be written.
+
+  </Accordion>
+
+  <Accordion title="Runtime patch">
+
+    | GUID | Description |
+    |------|-------------|
+    | `CBC59C4A-383A-41EB-A8EE-4498AEA567E4` | Remove 4GB limit for `CpuIo2` in the Runtime module |
+
+    This patch extends the address range supported by the CPU I/O protocol beyond 4GB, which is required for correct operation on systems with large MMIO windows.
+
+  </Accordion>
+
+  <Accordion title="Platform-specific USB 3 patches (supplementary files)">
+
+    When 4G Decoding is enabled, some firmwares break USB 3 ports in the UEFI pre-boot environment. These patches fix that by adding the platform's XHCI controller to the 64-bit BAR blacklist in PciBus.
+
+    | File | Platform | Intel chipset series |
+    |------|----------|----------------------|
+    | `IvyUSB3.txt` | Ivy Bridge | 7 Series (XHCI `8086:1e31`) |
+    | `HswUSB3.txt` | Haswell | 8 Series (XHCI `8086:9c31`) |
+    | `BdwUSB3.txt` | Broadwell | 9 Series (XHCI `8086:8cb1`) |
+
+    Each file works by replacing an existing force-32-bit BAR entry for an NVIDIA 7200 GS (`10de:01d3`) with the platform's XHCI controller device ID.
+
+  </Accordion>
+
+  <Accordion title="X79 Above 4G Decoding patch (commented out / untested)">
+
+    A patch targeting `IvtQpiandMrcInit` (GUID `5C08C7C8-24C2-4400-9627-CF2869421E06`) exists to extend the MMIOH limit and fix Above 4G Decoding on X79 platforms. It is currently **commented out** in `patches.txt` and marked as untested with multi-CPU configurations. Do not apply it unless you are specifically troubleshooting an X79 system and understand the risk.
+
+  </Accordion>
+</AccordionGroup>
+
+## Platform selection guide
+
+Use the table below to identify which patches are relevant for your CPU generation.
+
+| CPU generation | PciHostBridge patches | PciBus patches | Supplementary files |
+|----------------|-----------------------|----------------|---------------------|
+| Sandy Bridge (2nd gen) | #1, #2, #4, #5 | #1 | — |
+| Ivy Bridge (3rd gen) | #1, #2, #4, #5 | #1 | `IvyUSB3.txt` (if USB 3 is broken) |
+| Haswell (4th gen) | `HswAbove4G.txt` | #1, #3 or #4 | `HswUSB3.txt` (if USB 3 is broken) |
+| Broadwell (5th gen) | `HswAbove4G.txt` | #1, #3 or #4 | `BdwUSB3.txt` (if USB 3 is broken) |
+| Skylake / Kaby Lake / Coffee Lake (6–9th gen) | #3 | #2 | — |
+| X99 / Socket 2011-v3 | NVRAM whitelist (#1) | — | — |
+
+## About pad files
+
+UEFI firmware images include padding sections (pad files) between modules. UEFIPatch may inadvertently alter a pad file when it writes a patched module back, which can corrupt the image or prevent it from being accepted during flashing.
+
+<Warning>
+  After running UEFIPatch, open both the original and patched firmware in UEFITool and compare the pad files. If any pad file has changed, do not flash the patched image. Instead, apply the workaround described in [Apply UEFI patches with UEFIPatch tool](/patching/using-uefipatch).
+</Warning>
+
+For step-by-step instructions on running UEFIPatch and verifying the output, see [Apply UEFI patches with UEFIPatch tool](/patching/using-uefipatch).

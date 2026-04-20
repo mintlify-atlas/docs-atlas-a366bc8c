@@ -1,0 +1,138 @@
+---
+title: "ReBarState UEFI NVRAM variable reference"
+description: "Complete specification of the ReBarState UEFI variable including GUID, valid values, attributes, and platform access methods for Windows and Linux."
+---
+
+`ReBarState` is the single UEFI NVRAM variable that controls whether `ReBarDxe` configures Resizable BAR and what the maximum allowed BAR size is. The `ReBarState` user-space utility reads and writes this variable; `ReBarDxe` reads it during every boot at driver entry. Changing the value takes effect on the next reboot — no firmware reflash is required.
+
+## Variable specification
+
+| Property | Value |
+|---|---|
+| Name | `ReBarState` |
+| GUID | `A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE` |
+| Type | `UINT8` (1 byte) |
+| Attributes | `NON_VOLATILE` (0x1) \| `BOOTSERVICE_ACCESS` (0x2) \| `RUNTIME_ACCESS` (0x4) |
+
+## Value table
+
+The `UINT8` value encodes both the enabled/disabled state and the maximum BAR size as a power-of-two exponent in megabytes. Value `32` is treated as unlimited by the driver (equivalent to `UINT8_MAX` semantics — the driver clamps the requested size to whatever the device reports as its maximum supported size).
+
+| Value | BAR size limit |
+|---|---|
+| `0` | Disabled — `ReBarDxe` exits immediately without modifying any BARs |
+| `1` | 2 MB (2^1) |
+| `2` | 4 MB (2^2) |
+| `3` | 8 MB (2^3) |
+| `4` | 16 MB (2^4) |
+| `5` | 32 MB (2^5) |
+| `6` | 64 MB (2^6) |
+| `7` | 128 MB (2^7) |
+| `8` | 256 MB (2^8) |
+| `9–19` | 512 MB – 512 GB (2^n MB) |
+| `20` | 1 TB (2^20 MB) |
+| `21–31` | 2 TB – 2048 TB |
+| `32` | Unlimited — largest size supported by the device |
+
+<Info>
+Values above 32 are rejected by `ReBarState` at the application level (`if (std::stoi(i) > 32)` check in `ReBarState.cpp`). The driver itself only reads a single byte, so writing a value above 32 directly to the efivars file is technically possible but unsupported.
+</Info>
+
+## How the driver reads the variable
+
+From `ReBar.c:rebarInit()`:
+
+```c
+status = gRT->GetVariable(L"ReBarState", &reBarStateGuid,
+    &attributes,
+    &bufferSize, &reBarState);
+
+// any attempts to overflow reBarState should result in EFI_BUFFER_TOO_SMALL
+if (status != EFI_SUCCESS)
+    reBarState = 0;
+```
+
+`bufferSize` is set to `1` before the call, ensuring that any value larger than one byte causes `GetVariable` to return `EFI_BUFFER_TOO_SMALL` rather than overflowing the local variable. If the variable does not exist (`EFI_NOT_FOUND`) or any other error occurs, `reBarState` defaults to `0` and the driver exits without modifying BARs.
+
+## CMOS reset detection and auto-reset
+
+If `reBarState` is non-zero, the driver reads the system clock and compares the year against `BUILD_YEAR` (2023). A year before 2023 indicates the CMOS was reset (e.g. battery removed, jumper cleared), which could leave the system in an unpredictable state. In that case, the driver writes `0` back to NVRAM and exits:
+
+```c
+status = gRT->GetTime(&time, NULL);
+if (time.Year < BUILD_YEAR) {
+    reBarState = 0;
+    bufferSize = 1;
+    attributes = EFI_VARIABLE_NON_VOLATILE |
+                 EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                 EFI_VARIABLE_RUNTIME_ACCESS;
+
+    status = gRT->SetVariable(L"ReBarState", &reBarStateGuid,
+        attributes,
+        bufferSize, &reBarState);
+
+    return EFI_SUCCESS;
+}
+```
+
+<Warning>
+If your `ReBarState` value keeps being reset to 0, check your system's RTC date. A CMOS reset or dead battery will cause the year to fall below 2023, triggering this guard on every boot.
+</Warning>
+
+## Platform access
+
+<Tabs>
+  <Tab title="Linux">
+    ### Path
+
+    ```text
+    /sys/firmware/efi/efivars/ReBarState-A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE
+    ```
+
+    ### Binary file format
+
+    The efivars file prepends 4 bytes of attribute flags before the payload. The `ReBarState` utility uses this packed struct (from `ReBarState.cpp`):
+
+    ```c
+    struct __attribute__((__packed__)) rebarVar {
+        uint32_t attr;   /* variable attributes (4 bytes, little-endian) */
+        uint8_t  value;  /* ReBarState value (1 byte) */
+    };
+    ```
+
+    Total file size: **5 bytes**.
+
+    ### Write procedure
+
+    Linux marks all unrecognised EFI variables as immutable. The `ReBarState` utility handles this automatically:
+
+    1. Opens the existing file and clears the `FS_IMMUTABLE_FL` flag via `ioctl(FS_IOC_SETFLAGS)`.
+    2. Removes the existing file with `remove()`.
+    3. Creates a new file and writes the 5-byte struct with `attr` set to `NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS` (0x00000007) and `value` set to the chosen state.
+
+    You must run `ReBarState` as root. The utility checks `getuid() == 0` before attempting any file access.
+  </Tab>
+  <Tab title="Windows">
+    ### API calls
+
+    The utility uses the Win32 firmware environment variable API:
+
+    ```c
+    // Read
+    GetFirmwareEnvironmentVariable(
+        TEXT("ReBarState"),
+        TEXT("{A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE}"),
+        &rBarState, 1);
+
+    // Write
+    SetFirmwareEnvironmentVariableEx(
+        TEXT("ReBarState"),
+        TEXT("{A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE}"),
+        &rBarState, sizeof(UINT8), dwAttributes);
+    ```
+
+    ### Privilege requirement
+
+    The process must hold the `SE_SYSTEM_ENVIRONMENT_NAME` privilege. The utility requests this via `AdjustTokenPrivileges` at startup and exits if it cannot be obtained. Run `ReBarState.exe` as Administrator.
+  </Tab>
+</Tabs>

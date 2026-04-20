@@ -1,0 +1,121 @@
+---
+title: "Apply UEFI patches with UEFIPatch tool"
+description: "How to apply ReBarUEFI firmware patches using UEFIPatch 0.28.0, verify pad files are unchanged, and combine patch application with FFS module insertion."
+---
+
+UEFIPatch is a command-line utility from [LongSoft's UEFITool suite](https://github.com/LongSoft/UEFITool) that applies pattern-based binary patches to UEFI firmware images. You provide a firmware dump and a text file listing hex patterns to find and replace inside specific modules; UEFIPatch locates each matching UEFI module by GUID, searches for the byte pattern, and writes the replacement bytes into a new output file. The original firmware file is never modified.
+
+<Warning>
+  Use UEFIPatch version **0.28.0** specifically. The newer "NE" (New Engine) releases of UEFITool do not include UEFIPatch and use a different patching mechanism that is incompatible with the `patches.txt` format used here.
+</Warning>
+
+## Before you begin
+
+You need:
+
+- **UEFIPatch 0.28.0** — download from the [UEFITool 0.28.0 release page](https://github.com/LongSoft/UEFITool/releases/tag/0.28.0). Choose the binary matching your OS (Windows, Linux, or macOS).
+- **UEFITool NE** (any recent release) — used separately to inspect the patched image and verify pad files. Download from the main UEFITool releases page.
+- **A firmware dump** of your current BIOS, obtained from your motherboard vendor's update utility or a hardware programmer.
+- **The patch files** from the `UEFIPatch/` directory of the ReBarUEFI repository: `patches.txt` and, if relevant for your platform, the supplementary files `BdwUSB3.txt`, `HswAbove4G.txt`, `HswUSB3.txt`, or `IvyUSB3.txt`.
+
+Refer to [UEFI firmware patches for Resizable BAR](/patching/overview) to determine which patch files apply to your CPU generation.
+
+## Applying the patches
+
+<Steps>
+  <Step title="Download UEFIPatch 0.28.0">
+    Go to the [UEFITool 0.28.0 release page](https://github.com/LongSoft/UEFITool/releases/tag/0.28.0) and download the archive for your operating system. Extract the archive and note the path to the `UEFIPatch` executable.
+
+    <Note>
+      UEFIPatch is a standalone executable separate from the `UEFITool` GUI application included in the same release. Make sure you are running `UEFIPatch`, not `UEFITool`.
+    </Note>
+  </Step>
+
+  <Step title="Obtain a firmware dump">
+    You need a binary dump of your current BIOS firmware before patching. There are two common methods:
+
+    - **Vendor update utility**: Many motherboard vendors provide a tool (such as ASUS BIOS Flashback, MSI M-Flash export, or Gigabyte @BIOS backup) that can save the current firmware to a file.
+    - **Hardware programmer**: A CH341A programmer or similar device can read the SPI flash chip directly. This is more reliable and recommended if you plan to flash via hardware anyway.
+
+    Save the dump as a `.bin` file (e.g., `firmware.bin`).
+  </Step>
+
+  <Step title="Identify your platform and choose patch files">
+    Not all patches apply to all platforms. Using the wrong patch file will usually result in no patterns being found (a safe no-op), but using `HswAbove4G.txt` on a Sandy Bridge system, for example, would be pointless.
+
+    Check the [patch overview](/patching/overview) for the full platform matrix. For most systems, `patches.txt` alone is sufficient. Add supplementary files only if your platform and symptoms match.
+  </Step>
+
+  <Step title="Run UEFIPatch">
+    Place `UEFIPatch`, your firmware dump, and the patch file(s) in the same directory, then run:
+
+    ```bash
+    UEFIPatch firmware.bin patches.txt -o patched_firmware.bin
+    ```
+
+    **Command syntax:**
+
+    ```
+    UEFIPatch <input_image> <patches_file> -o <output_image>
+    ```
+
+    UEFIPatch prints a summary of each pattern it searched for and whether a match was found. Patterns that were not found are skipped without error — this is expected if your firmware doesn't contain that module or variant.
+
+    <Note>
+      To apply a supplementary patch file (e.g., for USB 3 fix on Ivy Bridge), run UEFIPatch a second time using the already-patched output as input:
+
+      ```bash
+      UEFIPatch patched_firmware.bin IvyUSB3.txt -o patched_firmware_usb3.bin
+      ```
+
+      You can chain as many passes as needed.
+    </Note>
+  </Step>
+
+  <Step title="Verify that pad files are unchanged">
+    Open both `firmware.bin` (original) and `patched_firmware.bin` in **UEFITool NE** and compare the padding sections (entries labeled "Pad" or "Free space") in the module tree.
+
+    <Warning>
+      If any pad file differs between the original and patched image, **do not flash the patched firmware**. A changed pad file indicates that a patched module expanded or contracted in a way that corrupted the image layout.
+
+      To work around this, identify which patch caused the change (by applying patches one at a time and checking after each), then exclude that specific patch line from your `patches.txt` and re-run. Alternatively, open a GitHub issue on the ReBarUEFI repository with the details of your firmware.
+    </Warning>
+
+    If pad files are identical, the patched image is safe to proceed with.
+  </Step>
+
+  <Step title="Add the FFS module with UEFITool NE">
+    Patching alone is not sufficient — you also need to insert the `ReBarDxe` FFS module into the firmware's DXE volume. This step is done with **UEFITool NE** (not UEFIPatch) after the patches have been applied.
+
+    <Tip>
+      Always apply all UEFIPatch patches first, then insert the FFS module into the already-patched image using UEFITool NE. Doing it in the other order can cause the pad file check to fail or the module insertion to be lost.
+    </Tip>
+
+    Follow the [Adding FFS module](https://github.com/xCuri0/ReBarUEFI/wiki/Adding-FFS-module) wiki guide for the FFS insertion step.
+  </Step>
+
+  <Step title="Flash the patched firmware">
+    Flash the final patched image using your vendor's tool or a hardware programmer. After booting:
+
+    1. Enable **4G Decoding** in your BIOS settings (required for BAR sizes above 1GB).
+    2. Disable **CSM** (Compatibility Support Module).
+    3. Run **ReBarState** to set the Resizable BAR size. Start with `32` (unlimited); if the system doesn't boot, clear CMOS and try a smaller value.
+  </Step>
+</Steps>
+
+## Platform-specific patch files
+
+<Tabs>
+  <Tab title="Ivy Bridge">
+    Apply `IvyUSB3.txt` if USB 3 ports stop working in the UEFI pre-boot environment after enabling 4G Decoding. This patch adds the Intel 7 Series XHCI controller (`8086:1e31`) to the 64-bit BAR blacklist in PciBus.
+  </Tab>
+  <Tab title="Haswell">
+    Apply `HswAbove4G.txt` to expand the MMIO address space to 512GB (required for Resizable BAR on Haswell). Apply `HswUSB3.txt` if USB 3 ports break in UEFI — it adds the Intel 8 Series XHCI controller (`8086:9c31`) to the 64-bit BAR blacklist.
+  </Tab>
+  <Tab title="Broadwell">
+    Apply `HswAbove4G.txt` (covers both Haswell and Broadwell MMIO expansion). Apply `BdwUSB3.txt` if USB 3 ports break in UEFI — it adds the Intel 9 Series XHCI controller (`8086:8cb1`) to the 64-bit BAR blacklist.
+  </Tab>
+  <Tab title="Sandy / Ivy Bridge DSDT">
+    If you apply the 16GB → 64GB MMIO patch from `patches.txt` on Sandy or Ivy Bridge and Resizable BAR still doesn't work correctly, your motherboard may require a DSDT table modification as well. See [DSDT modification for Sandy and Ivy Bridge](/patching/dsdt-patching).
+  </Tab>
+</Tabs>

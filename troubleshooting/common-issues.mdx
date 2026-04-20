@@ -1,0 +1,145 @@
+---
+title: "Fix common ReBarUEFI problems and errors"
+description: "Solutions for POST failures, ReBarState permission errors, NVRAM whitelist blocks, USB 3 breakage, and GPU detection issues after installing ReBarUEFI."
+---
+
+After flashing a modified firmware with the ReBarDxe module, most problems fall into a small number of known categories — incorrect BAR sizes, missing firmware patches, permission errors, or CMOS reset conditions. The fixes below cover every common failure mode documented in the project, including source-level quirks handled automatically by the driver.
+
+<AccordionGroup>
+  <Accordion title="System won't POST or boot after enabling ReBAR">
+    The most likely cause is that the configured BAR size is larger than your firmware or GPU supports. With an unsupported size, the PCI bus driver may fail to allocate MMIO space, leaving the system unable to initialize the GPU and complete POST.
+
+    **Immediate recovery:**
+
+    <Steps>
+      <Step title="Clear CMOS">
+        Power off and clear CMOS using the motherboard jumper or button. This resets all BIOS settings, including the ReBarState NVRAM variable, back to defaults.
+      </Step>
+      <Step title="Remove CMOS battery if clearing is ineffective">
+        On some boards, a CMOS reset via jumper is not sufficient to clear the NVRAM variable. Remove the CMOS battery for 30–60 seconds, then reinstall it and power on.
+      </Step>
+      <Step title="Confirm the system boots normally">
+        After clearing, ReBarState is reset to 0 and ReBAR is disabled. The system should boot normally.
+      </Step>
+      <Step title="Retry with a smaller BAR size">
+        Run ReBarState again and enter a smaller value, such as `8` (256 MB), before attempting larger sizes. This confirms your firmware handles large BARs at all before trying `32` (unlimited).
+      </Step>
+    </Steps>
+
+    <Tip>
+      If your BIOS does not support large BARs natively, apply the appropriate BAR size limit removal patches from `UEFIPatch/patches.txt` before retrying. Patches exist to remove 4 GB, 16 GB, and 64 GB limits depending on your platform.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="ReBarState keeps resetting to 0 after every boot">
+    ReBarDxe includes CMOS reset detection. On every boot it reads the system RTC clock, and if the reported year is earlier than 2023 (`BUILD_YEAR` in `ReBar.c`), the driver treats this as a CMOS reset event and writes `0` back to the ReBarState NVRAM variable before exiting.
+
+    **Cause:** The RTC battery is dead or the system clock was never set correctly, so the BIOS reports a year before 2023.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Enter BIOS setup and set the correct date and time">
+        Boot into BIOS setup (usually Delete or F2 at POST) and set the current date and year. Save and exit.
+      </Step>
+      <Step title="Replace the CMOS battery if the clock resets again">
+        If the date resets to a pre-2023 value after a power cycle, the CR2032 CMOS battery needs replacement. Replace it, set the clock again, then re-run ReBarState.
+      </Step>
+    </Steps>
+
+    <Note>
+      This behavior is intentional. A CMOS reset disables 4G Decoding and CSM settings simultaneously, and booting with ReBAR enabled in that state would prevent POST. The driver disables itself automatically to protect against this.
+    </Note>
+  </Accordion>
+
+  <Accordion title="GetLastError: 5 when running ReBarState on Windows">
+    Error code 5 from `GetLastError` is `ERROR_ACCESS_DENIED`. This occurs when the firmware's NVRAM SMI handler has a whitelist of allowed variable GUIDs, and the ReBarState GUID (`A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE`) is not on that list. The `SetFirmwareEnvironmentVariableEx` call is blocked at the firmware level.
+
+    **Fix — apply the NVRAM whitelist unlock patch:**
+
+    Apply the correct patch from `UEFIPatch/patches.txt` for your platform using UEFIPatch:
+
+    <CardGroup cols={2}>
+      <Card title="AMI APTIO V (X99 / Socket 2011-v3)">
+        Target GUID: `54B070F3-9EB8-47CC-ADAF-39029C853CBB`
+
+        Patch: `NvramSmiDxe` — replaces the conditional jump that enforces the whitelist check with an unconditional jump, allowing any variable GUID to be written.
+      </Card>
+      <Card title="NvramSmi (other platforms, by @vit9696)">
+        Target GUID: `842A454A-75E5-408B-8B1C-36420E4E3F21`
+
+        Patch: clears the comparison bytes that gate writes to whitelisted GUIDs only, opening NVRAM writes to all GUIDs.
+      </Card>
+    </CardGroup>
+
+    After flashing the patched firmware, re-run ReBarState and the write should succeed.
+  </Accordion>
+
+  <Accordion title="Failed to obtain SE_SYSTEM_ENVIRONMENT_NAME (Windows)">
+    This error is printed by ReBarState when `AdjustTokenPrivileges` fails to grant `SE_SYSTEM_ENVIRONMENT_NAME` to the current process. This privilege is required to call `GetFirmwareEnvironmentVariable` and `SetFirmwareEnvironmentVariableEx` on Windows.
+
+    **Fix:** Right-click `ReBarState.exe` and select **Run as administrator**. Standard user accounts and non-elevated administrator sessions do not hold this privilege by default.
+
+    <Warning>
+      Running ReBarState without elevation will always fail on Windows, even for accounts that are members of the Administrators group, because User Account Control strips elevated privileges from non-elevated processes.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="USB 3 ports stop working in BIOS with 4G Decoding enabled">
+    On Ivy Bridge, Haswell, and Broadwell platforms, enabling Above 4G Decoding can conflict with the USB 3 controller's MMIO mapping, causing USB 3 ports to become non-functional inside the BIOS setup. This affects keyboard and mouse input in BIOS and may prevent firmware-level USB boot devices from being detected.
+
+    **Fix:** Apply the platform-specific USB 3 fix patch using UEFIPatch. Separate patch files exist for each generation:
+
+    - `IvyUSB3.txt` — Ivy Bridge
+    - `HswUSB3.txt` — Haswell
+    - `BdwUSB3.txt` — Broadwell
+
+    These patches adjust the MMIO region assignments for the USB 3 controller to avoid conflicts with the expanded Above 4G address space.
+  </Accordion>
+
+  <Accordion title="GPU not detected or black screen after flashing">
+    If the system POSTs but the GPU produces no output, or the GPU is not visible to the OS, check the following in order:
+
+    <Steps>
+      <Step title="Confirm CSM is disabled">
+        Resizable BAR requires a UEFI-native GPU initialization path. If Compatibility Support Module (CSM) is enabled, the firmware may initialize the GPU in legacy mode and ReBAR will not be activated. Disable CSM in BIOS settings.
+      </Step>
+      <Step title="Confirm 4G Decoding is enabled">
+        Without Above 4G Decoding enabled, BARs larger than 256 MB cannot be mapped. Enable it in BIOS settings under PCI or Advanced configuration.
+      </Step>
+      <Step title="Reflash the original firmware and retry">
+        If the GPU is still not detected, reflash the board with the original unmodified firmware to confirm the GPU itself is functional, then redo the patching process carefully.
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Resizable BAR is enabled but no performance improvement">
+    ReBAR being accepted by the firmware does not automatically mean the GPU driver has activated it. The driver must also enable the feature on its side.
+
+    <Steps>
+      <Step title="Verify the BAR size in GPU-Z">
+        Open GPU-Z and check the **Resizable BAR** field. If it shows 256 MB or less, the BAR was not successfully resized. Confirm ReBarState is set to a non-zero value and that you have rebooted after setting it.
+      </Step>
+      <Step title="Enable ReBAR in AMD Radeon Software (AMD RX 5000/6000 series)">
+        Some AMD GPUs require the feature to be manually enabled in the driver. Open Radeon Software, go to **Gaming → Graphics**, and enable **AMD Radeon Smart Access Memory** or **Resizable BAR**. Cards in the RX 5000 and RX 6000 series may have this toggle.
+      </Step>
+      <Step title="Check NVIDIA Control Panel (NVIDIA GPUs)">
+        For supported NVIDIA GPUs, open NVIDIA Control Panel and look under **Manage 3D Settings → Resizable BAR**.
+      </Step>
+    </Steps>
+
+    <Note>
+      Performance gains depend on workload and GPU generation. Testing with an i5-3470 and Sapphire Nitro+ RX 580 8GB showed up to 12% FPS improvement with a 2 GB BAR size. Any BAR size larger than the default 256 MB can provide improvement even if not set to unlimited.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Sapphire RX 5600 XT Pulse reports incorrect BAR capability">
+    The Sapphire RX 5600 XT Pulse (vendor ID `0x1002`, device ID `0x731F`) has a known errata in its PCI Resizable BAR capability register. For BAR 0, it reports a capability value of `0x7000` which is invalid and would prevent the driver from setting an appropriate BAR size.
+
+    ReBarDxe includes a specific quirk to handle this device. In `pciRebarGetPossibleSizes` in `ReBar.c`, when this exact vendor/device/BAR/cap combination is detected, the capability value is corrected from `0x7000` to `0x3f000` before processing. This is handled automatically — no user action is required.
+
+    <Note>
+      This quirk is adapted from the Linux kernel's `amdgpu` driver, which contains the same fix for this card.
+    </Note>
+  </Accordion>
+</AccordionGroup>

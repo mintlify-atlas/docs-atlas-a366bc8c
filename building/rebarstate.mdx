@@ -1,0 +1,128 @@
+---
+title: "Build ReBarState configuration utility"
+description: "Build the ReBarState UEFI variable configuration tool on Windows and Linux using CMake to read and write the ReBarState NVRAM variable."
+---
+
+ReBarState is a command-line utility that reads and writes the `ReBarState` UEFI NVRAM variable, which controls the maximum Resizable BAR size the `ReBarDxe` driver will configure at boot. It is a standard C++17 CMake project that compiles to a single executable on both Windows and Linux.
+
+<Tip>
+  Prebuilt Windows binaries are available on the [GitHub Releases page](https://github.com/xCuri0/ReBarUEFI/releases). Linux users should build from source using the steps below.
+</Tip>
+
+## Prerequisites
+
+- **CMake 3.8** or later
+- A C++17-capable compiler: GCC or Clang on Linux, MSVC (`cl.exe`) on Windows
+- On Windows: a Visual Studio environment with `cl.exe` on `PATH` (e.g. a Developer Command Prompt)
+
+## Build instructions
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    git clone https://github.com/xCuri0/ReBarUEFI
+    cd ReBarUEFI/ReBarState
+
+    cmake -B build
+    cmake --build build
+    ```
+
+    Run the resulting binary as root:
+
+    ```bash
+    sudo ./build/ReBarState
+    ```
+  </Tab>
+  <Tab title="Windows">
+    Open a **Developer Command Prompt** (or any shell with `cl.exe` on `PATH`), then:
+
+    ```powershell
+    git clone https://github.com/xCuri0/ReBarUEFI
+    cd ReBarUEFI\ReBarState
+
+    cmake -B build
+    cmake --build build --config Release
+    ```
+
+    Run the resulting binary as Administrator:
+
+    ```powershell
+    .\build\Release\ReBarState.exe
+    ```
+
+    The Windows executable is built with the UAC manifest flag `requireAdministrator`, so Windows will prompt for elevation automatically when launched from Explorer.
+  </Tab>
+  <Tab title="Windows (CMake presets)">
+    The repository ships `CMakePresets.json` with four presets for Windows builds using the Ninja generator and `cl.exe`:
+
+    | Preset name | Architecture | Build type |
+    |---|---|---|
+    | `x64-debug` | x64 | Debug |
+    | `x64-release` | x64 | Release |
+    | `x86-debug` | x86 | Debug |
+    | `x86-release` | x86 | Release |
+
+    Use a preset with:
+
+    ```powershell
+    cmake --preset x64-release
+    cmake --build out/build/x64-release
+    ```
+
+    Output is placed under `out/build/<preset-name>/`.
+  </Tab>
+</Tabs>
+
+## What gets built
+
+The build produces a single executable (`ReBarState` on Linux, `ReBarState.exe` on Windows) that interactively reads and writes the `ReBarState` UEFI NVRAM variable under the GUID `{A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE}`.
+
+The variable holds a single `uint8_t` value:
+
+| Value | Meaning |
+|---|---|
+| `0` | Disabled |
+| `1`–`31` | Maximum BAR size = 2^value MB |
+| `32` | Unlimited BAR size |
+
+When writing the variable, ReBarState sets the attributes `NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS`.
+
+## Platform implementation details
+
+<Tabs>
+  <Tab title="Linux">
+    On Linux, the variable is read and written through the `efivarfs` filesystem at:
+
+    ```
+    /sys/firmware/efi/efivars/ReBarState-A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE
+    ```
+
+    The file layout is a packed struct: 4 bytes of UEFI variable attributes followed by 1 byte of value.
+
+    When updating an existing variable, ReBarState uses `ioctl(FS_IOC_GETFLAGS / FS_IOC_SETFLAGS)` to clear the immutable flag that the Linux kernel sets on all unknown EFI variables before removing and recreating the file.
+
+    <Warning>
+      The `efivarfs` filesystem must be mounted for ReBarState to work. On modern distributions it is mounted automatically at `/sys/firmware/efi/efivars/`. If it is not present, mount it manually:
+
+      ```bash
+      mount -t efivarfs efivarfs /sys/firmware/efi/efivars
+      ```
+    </Warning>
+
+    <Note>
+      The binary checks `getuid() == 0` at startup. If it is not run as root it prints an error and exits without modifying any variables.
+    </Note>
+  </Tab>
+  <Tab title="Windows">
+    On Windows, ReBarState uses the Win32 API:
+
+    - **Read:** `GetFirmwareEnvironmentVariable`
+    - **Write:** `SetFirmwareEnvironmentVariableEx` (with explicit attributes)
+
+    At startup it calls `AdjustTokenPrivileges` to enable `SE_SYSTEM_ENVIRONMENT_NAME` on the current process token. If the privilege cannot be obtained the binary exits with an error.
+
+    <Note>
+      The executable must be run as Administrator. The UAC manifest embedded by the CMake build (`requireAdministrator`) ensures Windows prompts for elevation when the binary is launched from the shell or Explorer.
+    </Note>
+  </Tab>
+</Tabs>

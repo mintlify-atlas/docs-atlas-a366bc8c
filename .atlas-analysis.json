@@ -1,0 +1,95 @@
+{
+  "projectType": "general",
+  "projectName": "ReBarUEFI",
+  "projectDescription": "A UEFI DXE driver that enables Resizable BAR (PCIe Base Address Register resizing) on systems that don't officially support it, unlocking GPU performance improvements on older motherboards.",
+  "theme": "aspen",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "requirements",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Installation",
+            "pages": [
+              "installation/adding-ffs-module",
+              "installation/rebarstate",
+              "installation/enabling-4g-decoding"
+            ]
+          },
+          {
+            "group": "UEFI Patching",
+            "pages": [
+              "patching/overview",
+              "patching/using-uefipatch",
+              "patching/dsdt-patching"
+            ]
+          },
+          {
+            "group": "Building from Source",
+            "pages": [
+              "building/rebardxe",
+              "building/rebarstate"
+            ]
+          },
+          {
+            "group": "Troubleshooting",
+            "pages": [
+              "troubleshooting/common-issues",
+              "troubleshooting/faq"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "How It Works",
+            "pages": [
+              "reference/architecture",
+              "reference/rebar-state-variable",
+              "reference/pci-hook"
+            ]
+          },
+          {
+            "group": "Compatibility",
+            "pages": [
+              "reference/supported-hardware",
+              "reference/known-patches"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Enables Resizable BAR (ReBAR) on UEFI systems without official support",
+    "UEFI DXE driver injected into firmware DXE volume for automatic execution on every boot",
+    "Hooks PciHostBridgeResourceAllocationProtocol to configure BAR sizes during PCI enumeration",
+    "ReBarState utility for Windows and Linux to configure maximum BAR size via NVRAM variable",
+    "UEFIPatch patches to fix 64-bit BAR handling limitations in older UEFI firmware",
+    "CMOS reset detection to safely disable ReBAR if system clock is reset",
+    "Support for BAR sizes from 1MB up to unlimited (2^32 MB) across up to 6 BARs per device",
+    "Compatible with Sandy Bridge through modern Intel platforms and AMD systems"
+  ],
+  "publicApiSurface": [
+    "rebarInit (EFI_HANDLE, EFI_SYSTEM_TABLE*) — DXE driver entry point",
+    "PreprocessControllerOverride — hooked PreprocessController for PciHostBridgeResourceAllocationProtocol",
+    "reBarSetupDevice (EFI_HANDLE, EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_PCI_ADDRESS) — configures ReBAR for a PCI device",
+    "ReBarState NVRAM variable (GUID: A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE) — stores maximum BAR size (0=disabled, 1-31=2^x MB, 32=unlimited)",
+    "ReBarState CLI — interactive tool to read/write the ReBarState UEFI variable on Windows and Linux",
+    "buildffs.py — build script to compile ReBarDxe.efi and package it as an FFS module",
+    "UEFIPatch patches.txt — patch definitions for removing BAR size limits and fixing 64-bit BAR handling"
+  ]
+}

@@ -1,0 +1,129 @@
+---
+title: "Enable Above 4G Decoding for Resizable BAR"
+description: "Why Above 4G Decoding is required for ReBarUEFI, how to find and enable it in BIOS, and platform-specific fixes for Sandy Bridge through Coffee Lake."
+---
+
+Above 4G Decoding (also called 4G Decoding) is a BIOS setting that allows PCIe devices to map their memory-mapped I/O regions above the 4 GB physical address boundary. Without it, all PCIe BARs must fit in the lower 4 GB of address space alongside system RAM, severely limiting how large a BAR can be. Resizable BAR becomes useful only when this constraint is removed and the GPU can have a BAR large enough to expose its full VRAM.
+
+## Why 4G Decoding is required
+
+The CPU's memory controller reserves a region below 4 GB for PCIe devices — this upper boundary is called TOLUD (Top of Low Usable DRAM). Without Above 4G Decoding, all PCIe BAR allocations must fit between TOLUD and 4 GB. On most systems this leaves less than 1 GB, sometimes as little as 512 MB depending on configuration.
+
+When Above 4G Decoding is enabled, the firmware can place BAR allocations above 4 GB, where the address space is effectively unlimited. This is a prerequisite for ReBarUEFI to configure BAR sizes larger than approximately 1 GB.
+
+<Note>
+If you cannot enable Above 4G Decoding, you can still benefit from ReBarUEFI with a limited BAR size. You can increase the usable space below 4 GB by reducing TOLUD in your BIOS, which may allow a BAR of up to 2 GB in some configurations.
+</Note>
+
+## Locating the setting in BIOS
+
+Above 4G Decoding is typically found under one of these menu paths:
+
+- **Advanced → PCI Configuration**
+- **Advanced → PCI Subsystem Settings**
+- **Advanced → System Agent Configuration → PCI Express Configuration**
+- **Chipset → North Bridge → PEG Port Configuration**
+
+The exact location varies by motherboard vendor and firmware version. Look for options labeled:
+- Above 4G Decoding
+- Above 4GB MMIO BIOS assignment
+- Above 4G memory BIOS assignment
+
+Enable the option, save, and reboot. You must also **disable CSM (Compatibility Support Module)** — leaving CSM enabled with Above 4G Decoding active can cause system instability or failure to POST.
+
+<Warning>
+Enabling Above 4G Decoding while CSM is still enabled can prevent your system from POSTing. Disable CSM first or at the same time. After making both changes, verify the system boots correctly before proceeding to set a ReBarState value.
+</Warning>
+
+## Hidden option access methods
+
+<AccordionGroup>
+  <Accordion title="What if I can't find 4G Decoding?">
+    Many motherboard vendors hide the Above 4G Decoding option in their consumer BIOS UI, even when the underlying firmware supports it. There are several methods to access hidden BIOS options:
+
+    **GRUB setup_var method**
+
+    This method uses a GRUB shell to write directly to BIOS setup variables (also called setup data offsets). The general process is:
+
+    1. Identify the BIOS setup variable offset for "Above 4G Decoding" using a tool like `IFRExtractor` or `Universal IFR Extractor` on your firmware image.
+    2. Boot a GRUB USB stick (for example, a live Linux ISO that drops you to a GRUB prompt).
+    3. Use the `setup_var` command to write the enable value to the identified offset:
+       ```
+       setup_var 0x<offset> 0x01
+       ```
+    4. Exit GRUB and boot normally — the setting is stored in NVRAM.
+
+    The exact offset differs for every motherboard. Search for your specific board model in the ReBarUEFI GitHub issues or community forums for community-sourced offsets.
+
+    **Modded BIOS / BIOS unlock tools**
+
+    Some community tools can patch the BIOS UI to unhide suppressed options, or you can use a BIOS mod service specific to your board. This approach carries risk — an invalid BIOS modification can brick the board.
+  </Accordion>
+
+  <Accordion title="What is TOLUD and how does it help?">
+    TOLUD (Top of Low Usable DRAM) is the physical address boundary below which the system RAM is visible to the CPU. The region between TOLUD and 4 GB is reserved for PCIe MMIO space. By default, TOLUD is set as high as possible to maximize usable RAM below 4 GB, which leaves little room for PCIe BARs.
+
+    Reducing TOLUD manually lowers this boundary, carving out a larger PCIe MMIO window below 4 GB. For example, reducing TOLUD to 2 GB on a system with 4–16 GB of RAM leaves up to 2 GB of space for PCIe BAR allocations — enough for a 2 GB Resizable BAR without enabling Above 4G Decoding.
+
+    TOLUD adjustment is available in some BIOS versions under advanced chipset or memory settings. It is a useful fallback if Above 4G Decoding cannot be enabled but is a more limited solution than full Above 4G Decoding support.
+  </Accordion>
+</AccordionGroup>
+
+## Platform-specific notes
+
+<Tabs>
+  <Tab title="Sandy/Ivy Bridge">
+    Sandy Bridge and Ivy Bridge systems can use Resizable BAR, but may require an additional DSDT (Differentiated System Description Table) modification in addition to enabling Above 4G Decoding. The MMIO space on these platforms is limited to 64 GB by default; a UEFIPatch entry extends this to use the full 512 GB/39-bit address range.
+
+    Some Sandy/Ivy Bridge boards also require the `PciHostBridge` patch to fix the `AddMemorySpace` call that can otherwise prevent large BAR allocations from being registered correctly.
+
+    See the ReBarUEFI wiki page on DSDT Patching for the Sandy/Ivy Bridge-specific DSDT modification if your system requires it.
+
+    <Note>
+      At least one user has confirmed Resizable BAR working on an i5 2500k (Sandy Bridge), so PCIe Gen2 is not a barrier in principle.
+    </Note>
+  </Tab>
+  <Tab title="Haswell/Broadwell">
+    Haswell and Broadwell platforms may encounter USB 3 port failures in BIOS after enabling Above 4G Decoding. A UEFIPatch entry is available to fix this:
+
+    > Fix USB 3 ports not working in BIOS with 4G Decoding enabled (Ivy Bridge/Haswell/Broadwell)
+
+    Apply this patch alongside the BAR size limit removal patches before flashing. The MMIO space patch for Haswell/Broadwell extends the available range to the full 512 GB/39-bit space, which resolves the older 64 GB cap that affected earlier patch versions.
+  </Tab>
+  <Tab title="X79">
+    X79 motherboards (LGA 2011, Sandy Bridge-E / Ivy Bridge-E) have a known issue with Above 4G Decoding. A specific UEFIPatch entry targets this:
+
+    ```
+    # IvtQpiandMrcInit | Extend MMIOH limit to fix Above 4G Decoding (X79), untested with multi CPU
+    5C08C7C8-24C2-4400-9627-CF2869421E06 10 P:0FB796....00006685D2:BA0020000066906685D2
+    ```
+
+    This patch modifies the `IvtQpiandMrcInit` module to raise the MMIOH (Memory Mapped I/O High) limit, which is what gates Above 4G Decoding on X79. Note that this patch is listed as untested with multi-CPU (dual-socket) configurations.
+
+    For AliExpress X99 boards, a community tutorial by Miyconst covers the full process including UEFIPatch application. The X99 patches are not always required for these boards.
+  </Tab>
+  <Tab title="Skylake/Kaby Lake/Coffee Lake">
+    These platforms support a 512 GB/39-bit MMIO range when properly patched. The relevant UEFIPatch entry expands the MMIO region from the default 16–32 GB window to the full 512 GB range, which is necessary for very large BAR allocations to succeed.
+
+    Above 4G Decoding is generally available as a visible BIOS option on consumer Z-series boards for these generations, though it may be in a non-obvious menu location.
+  </Tab>
+</Tabs>
+
+## Verifying 4G Decoding is active
+
+After enabling the setting and booting, you can verify it is active from the operating system:
+
+<Tabs>
+  <Tab title="Windows">
+    Open Device Manager, find your GPU under Display Adapters, open its Properties, and check the **Resources** tab. If a memory range starting above `0x100000000` (4 GB) is listed, Above 4G Decoding is working.
+  </Tab>
+  <Tab title="Linux">
+    Run `lspci -v` and look for your GPU's BAR entries. A BAR mapped to an address above `0x100000000` confirms Above 4G Decoding is active:
+
+    ```bash
+    lspci -v | grep -A 10 "VGA\|3D controller"
+    ```
+
+    You should see a memory region like `Memory at f000000000 (64-bit, prefetchable)` with a size matching or approaching your GPU's VRAM.
+  </Tab>
+</Tabs>

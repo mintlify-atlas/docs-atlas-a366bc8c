@@ -1,0 +1,126 @@
+---
+title: "Configure BAR size with ReBarState utility"
+description: "Use the ReBarState command-line tool on Windows and Linux to read and write the UEFI variable that controls the maximum Resizable BAR size."
+---
+
+ReBarState is a command-line utility that reads and writes the `ReBarState` UEFI variable, which tells the ReBarDxe firmware module what maximum BAR size to configure for PCIe devices. You set this value once; the firmware module reads it on every subsequent boot and applies it during PCI enumeration. A value of `32` enables unlimited BAR size, which works on most systems. If your system fails to POST with that value, reduce it until you find the largest size your BIOS can handle.
+
+## The ReBarState UEFI variable
+
+ReBarState stores a single byte in NVRAM under the variable name `ReBarState` with GUID `A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE`.
+
+| Value | Effect |
+|-------|--------|
+| `0`   | Disabled — Resizable BAR is not applied |
+| `1`–`31` | Maximum BAR size is set to 2^x MB (e.g., `8` = 256 MB, `10` = 1024 MB) |
+| `32`  | Unlimited — the largest BAR size the GPU and slot support is used |
+
+On Linux the variable is accessible at:
+
+```
+/sys/firmware/efi/efivars/ReBarState-A3C5B77A-C88F-4A93-BF1C-4A92A32C65CE
+```
+
+## Getting ReBarState
+
+<Tabs>
+  <Tab title="Windows">
+    Download the pre-built `ReBarState.exe` binary from the [ReBarUEFI releases page](https://github.com/xCuri0/ReBarUEFI/releases). No installation is required — run it directly.
+
+    **You must run it as Administrator.** Right-click `ReBarState.exe` and choose **Run as administrator**, or launch it from an elevated command prompt.
+  </Tab>
+  <Tab title="Linux">
+    There is no pre-built binary for Linux. Build from source using CMake:
+
+    <CodeGroup>
+
+    ```bash clone and build
+    git clone https://github.com/xCuri0/ReBarUEFI
+    cd ReBarUEFI/ReBarState
+    cmake -B build
+    cmake --build build
+    ```
+
+    ```bash run
+    sudo ./build/ReBarState
+    ```
+
+    </CodeGroup>
+
+    CMake 3.8 or later and a C++17-capable compiler (GCC or Clang) are required.
+  </Tab>
+</Tabs>
+
+## Running ReBarState
+
+When launched with the required privileges, the tool displays the current variable value and prompts for a new one:
+
+```
+ReBarState (c) 2023 xCuri0
+
+Current ReBarState 0 / Disabled
+
+Verify that 4G Decoding is enabled and CSM is disabled otherwise system will not POST with GPU. If your ReBarState value keeps getting reset then check your system time.
+
+It is recommended to first try smaller sizes above 256MB in case BIOS doesn't support large BARs.
+
+Enter ReBarState Value
+      0: Disabled
+Above 0: Maximum BAR size set to 2^x MB
+     32: Unlimited BAR size
+```
+
+Enter your desired value and press Enter. The tool confirms the write:
+
+```
+Writing value of 32 / Unlimited to ReBarState
+
+Successfully wrote ReBarState UEFI variable
+
+Reboot for changes to take effect
+```
+
+<Note>
+A reboot is required after writing the variable. The new BAR size takes effect when the ReBarDxe module runs during the next boot's PCI enumeration phase.
+</Note>
+
+## Choosing a value
+
+Start with `32` (unlimited) if your BIOS has been patched for large BAR support. If the system fails to POST, clear CMOS to reset the variable to `0`, then try progressively smaller values. Common starting points:
+
+- `8` = 256 MB — safe fallback for most systems
+- `10` = 1024 MB (1 GB) — requires Above 4G Decoding
+- `20` = 1048576 MB (1 TB) — effectively unlimited on most GPUs, written as a large-size value
+- `32` = unlimited — recommended if supported
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Failed to obtain SE_SYSTEM_ENVIRONMENT_NAME (Windows)">
+    The process does not have the `SE_SYSTEM_ENVIRONMENT_NAME` privilege, which is required to access UEFI variables on Windows.
+
+    **Fix:** Run `ReBarState.exe` as Administrator. Right-click the executable and select **Run as administrator**, or launch from an elevated command prompt or PowerShell session.
+  </Accordion>
+
+  <Accordion title="GetLastError: 5 (Windows)">
+    Error code 5 is `ERROR_ACCESS_DENIED`. On some systems, the BIOS enforces an NVRAM whitelist that blocks writes to unknown variables.
+
+    **Fix:** Apply the NVRAM whitelist removal patch from `UEFIPatch/patches.txt` to your firmware before trying again. This patch is listed as "NVRAM whitelist unlock" in the patches file. See the UEFIPatch guide for how to apply it.
+  </Accordion>
+
+  <Accordion title="ReBarState value keeps resetting to 0">
+    The firmware resets the `ReBarState` variable when it detects that the system clock is invalid — specifically when the year reported by the RTC is earlier than the firmware build year. This is a CMOS reset detection mechanism.
+
+    **Fix:** Enter BIOS setup and verify that the system date and time are set correctly. A dead CMOS battery can cause the clock to reset to a default date on every boot, triggering this reset. Replace the CMOS battery if needed.
+
+    <Warning>
+      If you clear CMOS to recover from a bad BAR size, the `ReBarState` variable will also be cleared. You will need to run ReBarState again after rebooting and setting the correct system time.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="System does not POST after setting a value">
+    An unsupported BAR size can prevent the system from booting if the BIOS cannot allocate the requested memory region.
+
+    **Fix:** Clear CMOS to reset the variable to `0`. In some cases, removing the CMOS battery for a few minutes is necessary for the reset to take effect. After recovering, retry with a smaller value.
+  </Accordion>
+</AccordionGroup>
